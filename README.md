@@ -2,6 +2,8 @@
 
 A terminal-based EPUB reader optimized for programming books, with inline 256-color image rendering and syntax-highlighted code blocks.
 
+![Termbook](https://raw.githubusercontent.com/macsplit/termbook/refs/heads/main/screenshot.png)
+
 ## About
 
 termbook is a derivative of [epr (epub-reader)](https://github.com/wustho/epr) by Benawi Adha, enhanced with features specifically designed for reading technical and programming books in the terminal.
@@ -82,19 +84,6 @@ pip install Pillow pygments
 
 # Run directly from virtual environment
 ./venv/bin/python termbook.py [EPUBFILE]
-```
-
-### Method 4: System Package Manager
-For Arch Linux users (AUR):
-```bash
-# If/when available in AUR
-yay -S termbook
-```
-
-For Debian/Ubuntu (if packaged):
-```bash
-# Future possibility
-sudo apt install termbook
 ```
 
 ## Usage
