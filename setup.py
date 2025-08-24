@@ -1,12 +1,34 @@
 #!/usr/bin/env python3
 from setuptools import setup
+import re
+import datetime
+
+# Update build time in termbook.py
+def update_build_time():
+    build_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    with open("termbook.py", "r") as f:
+        content = f.read()
+    
+    # Update the build time line
+    pattern = r'__build_time__ = "[^"]*"'
+    replacement = f'__build_time__ = "{build_time}"'
+    new_content = re.sub(pattern, replacement, content)
+    
+    with open("termbook.py", "w") as f:
+        f.write(new_content)
+    
+    print(f"Updated build time to: {build_time}")
+
+# Update build time before building
+update_build_time()
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
     name="termbook",
-    version="1.0.0",
+    version="1.1.0",
     author="Lee Hanken",
     author_email="",
     description="A terminal-based EPUB reader optimized for programming books",

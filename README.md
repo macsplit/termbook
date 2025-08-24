@@ -2,6 +2,8 @@
 
 A terminal-based EPUB reader optimized for programming books, with inline 256-color image rendering and syntax-highlighted code blocks.
 
+![termbook screenshot](screenshot.png)
+
 ## About
 
 termbook is a derivative of [epr (epub-reader)](https://github.com/wustho/epr) by Benawi Adha, enhanced with features specifically designed for reading technical and programming books in the terminal.
@@ -12,12 +14,12 @@ termbook is a derivative of [epr (epub-reader)](https://github.com/wustho/epr) b
 - **Syntax-highlighted code blocks** - Automatic language detection and highlighting for code snippets
 - **Full EPUB support** - Read any standard EPUB file
 - **Curses-based interface** - Clean, distraction-free reading experience
-- **Vim-like keybindings** - Familiar navigation for power users
+- **Simple keybindings** - Easy navigation with arrow keys and common shortcuts  
 - **Reading history** - Track your reading progress across sessions
-- **Bookmarks** - Mark and jump to specific positions
+- **Global bookmarks** - Save and annotate positions across all books
 - **Search functionality** - Find text within your books
 - **Table of Contents navigation** - Quick chapter jumping
-- **Adjustable text width** - Customize reading column width
+- **Dynamic terminal resize** - Automatically adapts text width when terminal is resized
 
 ## Attribution
 
@@ -41,61 +43,106 @@ The core EPUB reading functionality, curses interface, and navigation system are
 
 ## Installation
 
-### Method 1: Direct Installation
+### Recommended: Automated Installation
+
+**Prerequisites:**
+- Python 3.8 or higher
+- Terminal with 256-color support
+- Git
+
+**Quick Installation:**
+
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/leehanken/termbook.git
 cd termbook
 
-# Install Python dependencies
-pip install Pillow pygments
+# 2. Choose your installation method:
 
-# Make the script executable
-chmod +x termbook.py
+# Option A: Local installation (no sudo required) - installs to ~/.local/bin
+make install-local
 
-# Optionally, create a symlink in your PATH
-sudo ln -s $(pwd)/termbook.py /usr/local/bin/termbook
+# Option B: System-wide installation (requires sudo) - installs to /usr/local/bin
+make install
 ```
 
-### Method 2: Using pip with local directory
-```bash
-# Clone the repository
-git clone https://github.com/leehanken/termbook.git
-cd termbook
+That's it! The installation scripts will automatically:
+- Create and manage a virtual environment
+- Install all dependencies
+- Build and install termbook
+- Create a global `termbook` command
 
-# Install with pip (includes dependencies)
-pip install -e .
+**Using Make alternatives:**
+```bash
+# If you don't have make, run the scripts directly:
+./install_local.sh    # For local installation
+./install.sh          # For system-wide installation (requires sudo)
 ```
 
-### Method 3: Virtual Environment (Recommended)
+**Usage after installation:**
 ```bash
-# Clone the repository
+# Read an EPUB file
+termbook path/to/your/book.epub
+
+# Show help
+termbook --help
+
+# For local install, ensure ~/.local/bin is in your PATH
+# Add to ~/.bashrc or ~/.zshrc if needed:
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Manual Installation (Advanced Users)
+
+If you prefer manual control over the installation process:
+
+```bash
+# 1. Clone the repository
 git clone https://github.com/leehanken/termbook.git
 cd termbook
 
-# Create virtual environment
-python -m venv venv
+# 2. Create and activate virtual environment
+python3 -m venv venv
 source venv/bin/activate
 
-# Install dependencies
-pip install Pillow pygments
+# 3. Install dependencies and termbook
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+pip install -e .
 
-# Run directly from virtual environment
-./venv/bin/python termbook.py [EPUBFILE]
+# 4. Create wrapper script (choose location)
+# For local install (~/.local/bin):
+mkdir -p ~/.local/bin
+cp termbook_wrapper.sh ~/.local/bin/termbook
+chmod +x ~/.local/bin/termbook
+
+# For system-wide install (/usr/local/bin):
+sudo cp termbook_wrapper.sh /usr/local/bin/termbook
+sudo chmod +x /usr/local/bin/termbook
 ```
 
-### Method 4: System Package Manager
-For Arch Linux users (AUR):
+### Package Manager Installation
+
+Currently not available through package managers. Please use the automated installation method above.
+
+### Uninstalling
+
+To remove termbook:
+
 ```bash
-# If/when available in AUR
-yay -S termbook
+# Using make
+make uninstall
+
+# Or run the uninstall script directly
+./uninstall.sh
 ```
 
-For Debian/Ubuntu (if packaged):
-```bash
-# Future possibility
-sudo apt install termbook
-```
+This will remove:
+- The global `termbook` command
+- The virtual environment
+- All build artifacts
+
+Your reading history and bookmarks are stored in `~/.termbook` and are not removed during uninstallation.
 
 ## Usage
 
@@ -125,35 +172,31 @@ termbook --help
 |-----|--------|
 | `?` | Show help |
 | `q` | Quit |
-| `j`, `↓` | Scroll down |
-| `k`, `↑` | Scroll up |
-| `Ctrl-d` | Half page down |
-| `Ctrl-u` | Half page up |
+| `↓` | Scroll down |
+| `↑` | Scroll up |
 | `Space`, `PgDn`, `→` | Next page |
 | `PgUp`, `←` | Previous page |
 | `n` | Next chapter |
 | `p` | Previous chapter |
-| `g`, `Home` | Beginning of chapter |
-| `G`, `End` | End of chapter |
-| `o` | Open image in viewer |
+| `Home` | Beginning of chapter |
+| `End` | End of chapter |
+| `i` | Open image in viewer |
+| `u` | Open URLs |
 | `/` | Search |
-| `n` | Next search result |
-| `N` | Previous search result |
+| `n` | Next search result (during search) |
+| `p` | Previous search result (during search) |
 | `Tab`, `t` | Table of contents |
 | `m` | Show metadata |
-| `b[n]` | Set bookmark n |
-| `` `[n]`` | Jump to bookmark n |
-| `=` | Toggle/set width |
-| `-` | Decrease width |
-| `+` | Increase width |
+| `s` | Save bookmark with annotation |
+| `b` | Show saved bookmarks |
 | `c` | Cycle color schemes |
 
 ## Color Schemes
 
 termbook includes three color schemes:
-- **0**: Default theme
-- **1**: Dark theme
-- **2**: Light theme
+- **Default**: Terminal default colors
+- **Dark**: Dark theme optimized for dark terminals  
+- **Light**: Light theme optimized for light terminals
 
 Press `c` while reading to cycle through themes.
 

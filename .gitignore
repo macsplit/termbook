@@ -35,7 +35,16 @@ env/
 *~
 .DS_Store
 
+# Testing and debugging
+debug_*.py
+*_test.py
+*.log
+
+# Local scripts and wrappers
+local_install.sh
+
 # Project specific
 *.epub
 .epr_history
 .epr_state
+.termbook

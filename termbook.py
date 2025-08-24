@@ -11,37 +11,35 @@ Options:
     -r              print reading history
     -d              dump epub
     -h, --help      print short, long help
+    --clean         reset to fresh state (delete all bookmarks)
+    --debug         show debug info (chapter, position, build time)
 
 Key Binding:
     Help             : ?
     Quit             : q
-    Scroll down      : DOWN      j
-    Scroll up        : UP        k
-    Half screen up   : C-u
-    Half screen dn   : C-d
+    Scroll down      : DOWN
+    Scroll up        : UP
     Page down        : PGDN      RIGHT   SPC
     Page up          : PGUP      LEFT
     Next chapter     : n
     Prev chapter     : p
-    Beginning of ch  : HOME      g
-    End of ch        : END       G
-    Open image       : o
+    Beginning of ch  : HOME
+    End of ch        : END
+    Open image       : i
+    Open URL         : u
     Search           : /
     Next Occurrence  : n
-    Prev Occurrence  : N
-    Toggle width     : =
-    Set width        : [count]=
-    Shrink           : -
-    Enlarge          : +
+    Prev Occurrence  : p
     ToC              : TAB       t
     Metadata         : m
-    Mark pos to n    : b[n]
-    Jump to pos n    : `[n]
-    Switch colorsch  : [default=0, dark=1, light=2]c
+    Save bookmark    : s
+    Bookmarks        : b
+    Switch colorsch  : c
 """
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+__build_time__ = "2025-08-24 18:26:33"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -58,6 +56,11 @@ import json
 import tempfile
 import shutil
 import subprocess
+import signal
+import time
+import threading
+import atexit
+import webbrowser
 import xml.etree.ElementTree as ET
 from urllib.parse import unquote
 from html import unescape
@@ -83,27 +86,20 @@ except ImportError:
 
 # key bindings
 SCROLL_DOWN = {curses.KEY_DOWN}
-SCROLL_DOWN_J = {ord("j")}
 SCROLL_UP = {curses.KEY_UP}
-SCROLL_UP_K = {ord("k")}
-HALF_DOWN = {4}
-HALF_UP = {21}
 PAGE_DOWN = {curses.KEY_NPAGE, ord("l"), ord(" "), curses.KEY_RIGHT}
 PAGE_UP = {curses.KEY_PPAGE, ord("h"), curses.KEY_LEFT}
 CH_NEXT = {ord("n")}
 CH_PREV = {ord("p")}
-CH_HOME = {curses.KEY_HOME, ord("g")}
-CH_END = {curses.KEY_END, ord("G")}
-SHRINK = ord("-")
-WIDEN = ord("+")
-WIDTH = ord("=")
+CH_HOME = {curses.KEY_HOME}
+CH_END = {curses.KEY_END}
 META = {ord("m")}
 TOC = {9, ord("\t"), ord("t")}
 FOLLOW = {10}
-QUIT = {ord("q"), 3, 27, 304}
+QUIT = {ord("q"), 3, 304}
 HELP = {ord("?")}
-MARKPOS = ord("b")
-JUMPTOPOS = ord("`")
+BOOKMARKS = ord("b")
+SAVE_BOOKMARK = ord("s")
 COLORSWITCH = ord("c")
 
 
@@ -120,7 +116,24 @@ STATE = {}
 LINEPRSRV = 0  # default = 2
 COLORSUPPORT = False
 SEARCHPATTERN = None
+CURRENT_SEARCH_TERM = None  # Store current search term for highlighting
+WHOLE_BOOK_SEARCH_START = None  # Track starting chapter for whole-book search
+WHOLE_BOOK_SEARCH_VISITED = []  # Track visited chapters during whole-book search
 VWR = None
+DEBUG_MODE = False  # Global debug flag
+BOOKMARKSFILE = ""  # Global bookmarks file path
+GLOBAL_BOOKMARKS = []  # List of global bookmarks
+INITIAL_HELP_SHOWN = False  # Track if initial help message has been shown and dismissed
+
+# Terminal resize handling
+RESIZE_REQUESTED = False
+RESIZE_TIMER = None
+RESIZE_DELAY = 1.0  # Wait 1 second after last resize before re-rendering
+LAST_TERMINAL_SIZE = (0, 0)  # Track last known terminal size
+
+# Chapter loading animation
+LOADING_IN_PROGRESS = False  # Track if chapter loading animation is active
+
 JUMPLIST = {}
 
 
@@ -235,6 +248,7 @@ class HTMLtoLines(HTMLParser):
         HTMLParser.__init__(self)
         self.text = [""]
         self.imgs = []
+        self.img_alts = []  # Store alt text for images
         self.ishead = False
         self.isinde = False
         self.isbull = False
@@ -242,24 +256,34 @@ class HTMLtoLines(HTMLParser):
         self.iscode = False  # Track if we're in a code block
         self.isprose = False  # Track if explicitly marked as prose via class
         self.ishidden = False
+        self.in_sup = False  # Track if we're in a superscript tag
+        self.in_sub = False  # Track if we're in a subscript tag
+        self.iscaption = False  # Track if we're in a listing/figure caption
+        self.in_pre_block = False  # Track if we're inside a <pre> block
+        self.current_link_href = None  # Track current link href
         self.idhead = set()
         self.idinde = set()
         self.idbull = set()
         self.idpref = set()
         self.idcode = set()  # Track code block line indices
         self.idprose = set()  # Track prose block line indices
+        self.idcaption = set()  # Track listing/figure caption line indices
         self.code_lang = None  # Track detected language for current code block
 
     def handle_starttag(self, tag, attrs):
-        # Check for prose-indicating classes on ANY tag (highest priority)
+        # Check for special classes on ANY tag (highest priority)
         for attr_name, attr_value in attrs:
             if attr_name == "class" and attr_value:
                 for class_name in attr_value.split():
-                    if "text" in class_name.lower():
+                    if "caption" in class_name.lower():
+                        # Any class containing "caption" indicates a caption
+                        self.iscaption = True
+                        break
+                    elif "text" in class_name.lower():
                         # Any class containing "text" indicates prose, not code
                         self.isprose = True
                         break
-                if self.isprose:
+                if self.isprose or self.iscaption:
                     break
         
         if re.match("h[1-6]", tag) is not None:
@@ -272,6 +296,8 @@ class HTMLtoLines(HTMLParser):
             self.code_lang = None
             # Reset prose flag - <pre> tags should take priority over parent class attributes
             self.isprose = False
+            # Mark that we're in a pre block for nested tag handling
+            self.in_pre_block = True
             
             for attr_name, attr_value in attrs:
                 if attr_name == "class" and attr_value:
@@ -289,7 +315,7 @@ class HTMLtoLines(HTMLParser):
                                 self.code_lang = class_name.replace("language-", "").replace("lang-", "")
                                 break
                             # Also detect common code block class names including "code-area"
-                            elif class_name in ("programlisting", "code", "codeintext", "sourceCode", "highlight", "code-area"):
+                            elif class_name in ("programlisting", "code", "codeintext", "sourceCode", "highlight", "code-area") or "screen" in class_name.lower():
                                 # This pre tag likely contains code, mark it as code
                                 self.iscode = True  # Force this to be treated as code
                                 break
@@ -310,29 +336,56 @@ class HTMLtoLines(HTMLParser):
         elif tag in self.hide:
             self.ishidden = True
         elif tag == "sup":
-            self.text[-1] += "^{"
+            # Handle superscript - use superscript numbers if possible, otherwise brackets
+            self.in_sup = True
+            self.text[-1] += "["
         elif tag == "sub":
-            self.text[-1] += "_{"
+            # Handle subscript - use brackets for clarity
+            self.in_sub = True
+            self.text[-1] += "₍"
+        elif tag == "a":
+            # Handle anchor/link tags
+            for attr_name, attr_value in attrs:
+                if attr_name == "href" and attr_value:
+                    # Store the href for potential use
+                    self.current_link_href = attr_value
+                    break
+            else:
+                self.current_link_href = None
         # NOTE: "img" and "image"
         # In HTML, both are startendtag (no need endtag)
         # but in XHTML both need endtag
         elif tag in {"img", "image"}:
+            img_src = None
+            img_alt = ""
             for i in attrs:
                 if (tag == "img" and i[0] == "src")\
                    or (tag == "image" and i[0].endswith("href")):
-                    self.text.append("[IMG:{}]".format(len(self.imgs)))
-                    self.imgs.append(unquote(i[1]))
+                    img_src = unquote(i[1])
+                elif i[0] == "alt":
+                    img_alt = i[1]
+            if img_src:
+                self.text.append("[IMG:{}]".format(len(self.imgs)))
+                self.imgs.append(img_src)
+                self.img_alts.append(img_alt)
 
     def handle_startendtag(self, tag, attrs):
         if tag == "br":
             self.text += [""]
         elif tag in {"img", "image"}:
+            img_src = None
+            img_alt = ""
             for i in attrs:
                 if (tag == "img" and i[0] == "src")\
                    or (tag == "image" and i[0].endswith("href")):
-                    self.text.append("[IMG:{}]".format(len(self.imgs)))
-                    self.imgs.append(unquote(i[1]))
-                    self.text.append("")
+                    img_src = unquote(i[1])
+                elif i[0] == "alt":
+                    img_alt = i[1]
+            if img_src:
+                self.text.append("[IMG:{}]".format(len(self.imgs)))
+                self.imgs.append(img_src)
+                self.img_alts.append(img_alt)
+                self.text.append("")
 
     def handle_endtag(self, tag):
         if re.match("h[1-6]", tag) is not None:
@@ -342,6 +395,7 @@ class HTMLtoLines(HTMLParser):
         elif tag in self.para:
             self.text.append("")
             self.isprose = False  # Reset prose flag when paragraph ends
+            self.iscaption = False  # Reset caption flag when paragraph ends
         elif tag in self.hide:
             self.ishidden = False
         elif tag in self.inde:
@@ -352,22 +406,37 @@ class HTMLtoLines(HTMLParser):
             if self.text[-1] != "":
                 self.text.append("")
             self.ispref = False
+            self.in_pre_block = False  # No longer in pre block
             # Reset iscode when pre tag ends (it may have been set by class attribute)
             # But only if we're not inside a nested code tag
             self.iscode = False
             self.isprose = False  # Reset prose flag
             self.code_lang = None  # Reset language
         elif tag in self.code:
-            self.iscode = False
+            # Don't reset iscode if we're still inside a pre block
+            # This prevents nested <pre><code> from losing code context
+            if not self.in_pre_block:
+                self.iscode = False
             self.code_lang = None  # Reset language
         elif tag in self.bull:
             if self.text[-1] != "":
                 self.text.append("")
             self.isbull = False
-        elif tag in {"sub", "sup"}:
-            self.text[-1] += "}"
+        elif tag == "sup":
+            self.text[-1] += "]"
+            self.in_sup = False
+        elif tag == "sub":
+            self.text[-1] += "₎"
+            self.in_sub = False
+        elif tag == "a":
+            # Clear the href when the link ends
+            self.current_link_href = None
         elif tag in {"img", "image"}:
             self.text.append("")
+        
+        # Reset annotation flag when any tag ends (since annotations are span-based)
+        if tag == "span":
+            self.isannotation = False
 
     def handle_data(self, raw):
         if raw and not self.ishidden:
@@ -387,30 +456,57 @@ class HTMLtoLines(HTMLParser):
             line = line.replace('◾', '•')  # Replace black medium small square with bullet
             line = line.replace('◽', '◦')  # Replace white medium small square with white bullet
             
-            self.text[-1] += line
+            # Convert circled numbers to readable annotation format for code listings
+            # These are commonly used in technical books to annotate code
+            circled_numbers = {
+                '①': '#1', '②': '#2', '③': '#3', '④': '#4', '⑤': '#5',
+                '⑥': '#6', '⑦': '#7', '⑧': '#8', '⑨': '#9', '⑩': '#10',
+                '⑪': '#11', '⑫': '#12', '⑬': '#13', '⑭': '#14', '⑮': '#15',
+                '⑯': '#16', '⑰': '#17', '⑱': '#18', '⑲': '#19', '⑳': '#20'
+            }
+            for circled, annotation in circled_numbers.items():
+                # Replace circled numbers with compact annotation format
+                # Instead of adding lots of padding, just use minimal spacing
+                line = line.replace(circled, f' {annotation}')
+            
+            # Special handling for links - use href for external URLs, keep text for internal refs
+            if self.current_link_href and re.match(r'https?://', self.current_link_href):
+                # For external URLs, use the href URL and ignore the text
+                # The URL will be highlighted by the URL detection later
+                self.text[-1] += self.current_link_href
+            else:
+                # For internal references or non-URL hrefs, keep the original text
+                self.text[-1] += line
             if self.ishead:
                 self.idhead.add(len(self.text)-1)
             elif self.isbull:
                 self.idbull.add(len(self.text)-1)
             elif self.isinde:
                 self.idinde.add(len(self.text)-1)
-            elif self.ispref or self.iscode:
-                # Mark as preformatted - <pre> and <code> tags take priority over parent class attributes
+            elif self.ispref or self.in_pre_block:
+                # Mark as preformatted if we're in a <pre> block OR if we were in one recently
+                # This handles inline tags within <pre> blocks that might lose context
                 self.idpref.add(len(self.text)-1)
-                if self.iscode:  # Only mark as code if it's actually a code tag
+                if self.iscode or self.in_pre_block:  # If we're in any form of code context
                     self.idcode.add(len(self.text)-1)
                     # Remove from prose if it was previously marked (prevents dual marking)
                     self.idprose.discard(len(self.text)-1)
-                # NOTE: Don't mark as prose here - <pre>/<code> tags override parent class attributes
+                # NOTE: Don't mark as prose here - <pre> tags override parent class attributes
+            elif self.iscaption:  # Mark as caption if class contains "caption"
+                self.idcaption.add(len(self.text)-1)
             elif self.isprose:  # Mark regular text as prose if class contains "text"
                 self.idprose.add(len(self.text)-1)
+            # Default case: if we're not in any special block, treat as regular prose
+            # This handles regular <p> paragraphs that don't have special classes
+            else:
+                pass  # Regular text - will be processed as normal prose in get_lines()
 
     def _is_continuation_line(self, current_line, next_line, current_idx=None, next_idx=None):
         """Check if next_line is a continuation of current_line"""
         if not current_line or not next_line:
             return False
         
-        # CRITICAL: Don't concatenate different content types (code, bullets, prose)
+        # CRITICAL: Don't concatenate different content types (code, bullets, prose, headers)
         if current_idx is not None and next_idx is not None:
             current_is_code = current_idx in self.idcode
             next_is_code = next_idx in self.idcode
@@ -418,6 +514,14 @@ class HTMLtoLines(HTMLParser):
             next_is_bullet = next_idx in self.idbull
             current_is_prose = current_idx in self.idprose
             next_is_prose = next_idx in self.idprose
+            current_is_header = current_idx in self.idhead
+            next_is_header = next_idx in self.idhead
+            current_is_caption = current_idx in self.idcaption
+            next_is_caption = next_idx in self.idcaption
+            
+            # Never concatenate headers or captions with anything else
+            if current_is_header or next_is_header or current_is_caption or next_is_caption:
+                return False
             
             # Never concatenate code with anything else
             if current_is_code or next_is_code:
@@ -444,6 +548,15 @@ class HTMLtoLines(HTMLParser):
         if current_stripped.endswith(('.', '!', '?', ':', ';')):
             return False
         
+        # Don't concatenate if next line appears to be a figure/listing caption or title
+        import re
+        caption_pattern = re.compile(r'^(Figure|Listing|Table|Example|Exhibit|Diagram|Chart|Graph|Illustration|Code|Algorithm|Equation)\s+\d+\.?\d*', re.IGNORECASE)
+        if caption_pattern.match(next_stripped):
+            return False
+        # Also don't concatenate if current line IS a listing/figure caption
+        if caption_pattern.match(current_stripped):
+            return False
+        
         # Don't concatenate if next line starts with typical paragraph starters
         paragraph_starters = ['Chapter', 'CHAPTER', 'Part', 'PART', '1.', '2.', '3.', '4.', '5.', 
                              '6.', '7.', '8.', '9.', '0.', 'I.', 'II.', 'III.', 'IV.', 'V.',
@@ -464,6 +577,15 @@ class HTMLtoLines(HTMLParser):
         if abs(current_indent - next_indent) > 2:
             return False
         
+        # Don't concatenate lines that look like code (contain import, class, etc)
+        code_keywords = ['import ', 'class ', 'public ', 'private ', 'def ', 'function ', 'var ', 'const ', 'let ']
+        if any(keyword in current_line.lower() or keyword in next_line.lower() for keyword in code_keywords):
+            return False
+        
+        # Don't concatenate if line contains footnote markers
+        if re.search(r'\[\d+\]|\^\d+|［\d+］', current_stripped) or re.search(r'\[\d+\]|\^\d+|［\d+］', next_stripped):
+            return False
+        
         return True
 
     def _looks_like_code(self, text):
@@ -477,6 +599,22 @@ class HTMLtoLines(HTMLParser):
         lines = [line.rstrip() for line in text.split('\n') if line.strip()]
         if not lines:
             return False
+        
+        # Check if this is a "Listing X.X" style code block
+        first_line = lines[0].strip()
+        if re.match(r'^Listing\s+\d+\.?\d*\s+', first_line, re.IGNORECASE):
+            # This is a code listing - always treat as code
+            return True
+        
+        # Check for XML content - very strong indicator
+        if any(line.strip().startswith('<?xml') for line in lines):
+            return True
+        if any(line.strip().startswith('<!DOCTYPE') for line in lines):
+            return True
+        # XML tags pattern (but not HTML-like tags that appear in prose)
+        xml_tag_count = len(re.findall(r'<[^/>][^>]*>[^<]*</[^>]+>', text))
+        if xml_tag_count >= 2:
+            return True
         
         code_score = 0
         prose_score = 20   # Start with reasonable prose advantage
@@ -908,67 +1046,100 @@ class HTMLtoLines(HTMLParser):
             except ClassNotFound:
                 pass
         
-        # Try to guess the language
-        try:
-            lexer = guess_lexer(code_text)
-            # If guess_lexer returns TextLexer, try heuristics
-            if lexer.__class__.__name__ == 'TextLexer':
-                raise ClassNotFound("Guessing failed, trying heuristics")
-            return lexer
-        except ClassNotFound:
-            # Use heuristics for common languages
-            code_lower = code_text.lower().strip()
+        # Strip "Listing X.X" prefix if present for better language detection
+        cleaned_code = code_text
+        if re.match(r'^Listing\s+\d+\.?\d*\s+', code_text, re.IGNORECASE):
+            # Remove the "Listing X.X Title" line for better language detection
+            lines = code_text.split('\n')
+            if len(lines) > 1:
+                cleaned_code = '\n'.join(lines[1:])
+        
+        # Use heuristics first for common patterns (more reliable than guess_lexer)
+        code_lower = cleaned_code.lower().strip()
+        
+        # Java heuristics - enhanced detection
+        java_keywords = ['public class', 'private class', 'protected class', 
+                         'public interface', 'private interface',
+                         'public static', 'private static', 'protected static',
+                         'public final', 'private final', 
+                         'public synchronized', 'private synchronized',
+                         'system.out.print', 'public void', 'private void',
+                         'import java.', 'package ', '@override', '@autowired',
+                         'new ', 'extends ', 'implements ', 'throws ',
+                         'public enum', 'private enum']
+        
+        # Also check for common Java patterns (getter/setter, types)
+        java_patterns = ['getid()', 'setid(', 'getname()', 'setname(',
+                        'string ', 'integer ', 'boolean ', 'double ', 'float ',
+                        'final ', 'static final', 'return id;', 'return name;',
+                        'this.', '.equals(', '.hashcode(', '.tostring(']
             
-            # Java heuristics
-            if ('public class' in code_lower or 'private class' in code_lower or 
-                'public static void main' in code_lower or 'system.out.print' in code_lower):
-                try:
-                    return get_lexer_by_name('java')
-                except ClassNotFound:
-                    pass
-            
-            # Python heuristics  
-            elif ('def ' in code_lower or 'import ' in code_lower or 'print(' in code_lower):
-                try:
-                    return get_lexer_by_name('python')
-                except ClassNotFound:
-                    pass
-            
-            # JavaScript heuristics
-            elif ('function ' in code_lower or 'console.log' in code_lower or 'var ' in code_lower or 'let ' in code_lower):
-                try:
-                    return get_lexer_by_name('javascript')
-                except ClassNotFound:
-                    pass
-            
-            # C/C++ heuristics
-            elif ('#include' in code_lower or 'int main(' in code_lower or 'printf(' in code_lower):
-                try:
-                    return get_lexer_by_name('c')
-                except ClassNotFound:
-                    pass
-            
-            # Cypher heuristics (Neo4j query language)
-            elif (('create (' in code_lower or 'match (' in code_lower or 'load csv' in code_lower or 
+        if any(keyword in code_lower for keyword in java_keywords) or \
+           any(pattern in code_lower for pattern in java_patterns):
+            try:
+                return get_lexer_by_name('java')
+            except ClassNotFound:
+                pass
+        
+        # Python heuristics  
+        elif ('def ' in code_lower or 'import ' in code_lower or 'print(' in code_lower):
+            try:
+                return get_lexer_by_name('python')
+            except ClassNotFound:
+                pass
+        
+        # JavaScript heuristics
+        elif ('function ' in code_lower or 'console.log' in code_lower or 'var ' in code_lower or 'let ' in code_lower):
+            try:
+                return get_lexer_by_name('javascript')
+            except ClassNotFound:
+                pass
+        
+        # XML heuristics - prioritize XML detection
+        elif ('<?xml' in code_lower or '<!doctype' in code_lower or 
+              ('<!entity' in code_lower and '&' in code_lower and ';' in code_lower) or
+              (code_lower.count('<') >= 2 and code_lower.count('>') >= 2)):
+            try:
+                return get_lexer_by_name('xml')
+            except ClassNotFound:
+                pass
+        
+        # C/C++ heuristics
+        elif ('#include' in code_lower or 'int main(' in code_lower or 'printf(' in code_lower):
+            try:
+                return get_lexer_by_name('c')
+            except ClassNotFound:
+                pass
+        
+        # Cypher heuristics (Neo4j query language)
+        elif (('create (' in code_lower or 'match (' in code_lower or 'load csv' in code_lower or 
                    'merge (' in code_lower or 'return ' in code_lower or 'where ' in code_lower) and 
                   ('businessobject' in code_lower or ':' in code_text or '[:' in code_text or 
                    'neo4j' in code_lower or 'cypher' in code_lower or 'graph' in code_lower or
                    'objectid' in code_lower or 'row.' in code_lower)):
-                try:
-                    return get_lexer_by_name('cypher')
-                except ClassNotFound:
-                    pass
-            
-            # CSV heuristics (comma-separated values)
-            elif (',' in code_text and code_text.count('\n') > 0 and 
+            try:
+                return get_lexer_by_name('cypher')
+            except ClassNotFound:
+                pass
+        
+        # CSV heuristics (comma-separated values)
+        elif (',' in code_text and code_text.count('\n') > 0 and 
                   len([line for line in code_text.split('\n') if ',' in line]) >= 2):
-                try:
-                    # CSV doesn't have a dedicated lexer, use text with basic highlighting
-                    return get_lexer_by_name('text')
-                except ClassNotFound:
-                    pass
-            
-            # Fall back to plain text
+            try:
+                # CSV doesn't have a dedicated lexer, use text with basic highlighting
+                return get_lexer_by_name('text')
+            except ClassNotFound:
+                pass
+        
+        # If heuristics didn't match, try guess_lexer as fallback
+        try:
+            lexer = guess_lexer(cleaned_code)
+            # If guess_lexer returns TextLexer, reject it
+            if lexer.__class__.__name__ == 'TextLexer':
+                return TextLexer()
+            return lexer
+        except ClassNotFound:
+            # Default to TextLexer if nothing matched
             return TextLexer()
     
     def reorganize_callouts(self, code_text):
@@ -1168,6 +1339,18 @@ class HTMLtoLines(HTMLParser):
             # Detect language (use original text for detection)
             lexer = self.detect_language(code_text, hint_lang)
             
+            # If no lexer detected, use bright white fallback
+            if lexer is None:
+                lines = organized_text.split('\n')
+                result = []
+                for line in lines:
+                    if line.strip():  # Only color non-empty lines
+                        white_colors = [(255, 255, 255)] * len(line)
+                        result.append((line, white_colors))
+                    else:
+                        result.append((line, []))
+                return result if result else [(code_text, [(255, 255, 255)] * len(code_text))]
+            
             # Get tokens from organized text
             tokens = list(lexer.get_tokens(organized_text))
             
@@ -1212,8 +1395,16 @@ class HTMLtoLines(HTMLParser):
             return result if result else [(code_text, [])]
             
         except Exception:
-            # Fall back to original text if highlighting fails
-            return [(code_text, [])]
+            # Fall back to bright white text if highlighting fails - better than grey
+            lines = code_text.split('\n')
+            result = []
+            for line in lines:
+                if line.strip():  # Only color non-empty lines
+                    white_colors = [(255, 255, 255)] * len(line)
+                    result.append((line, white_colors))
+                else:
+                    result.append((line, []))
+            return result if result else [(code_text, [(255, 255, 255)] * len(code_text))]
     
     def get_token_color(self, token_type):
         """Map Pygments token types to terminal colors."""
@@ -1242,9 +1433,19 @@ class HTMLtoLines(HTMLParser):
             'Comment': (128, 128, 128),         # Medium gray for comments
             'Comment.Single': (128, 128, 128),
             'Comment.Multiline': (128, 128, 128),
+            'Comment.Preproc': (255, 255, 255),  # Bright white for XML declarations and DTD
             
             'Operator': (255, 255, 255),        # White for operators
             'Punctuation': (255, 255, 255),     # White for punctuation
+            
+            # XML-specific token types
+            'Name.Tag': (0, 150, 255),           # Blue for XML tags
+            'Name.Attribute': (255, 255, 0),     # Yellow for XML attributes  
+            'Literal.String.Doc': (0, 255, 0),   # Green for XML content
+            'Generic.Emph': (255, 255, 255),     # White for emphasized content
+            'Generic.Strong': (255, 255, 255),   # White for strong content
+            'Text': (255, 255, 255),             # White for plain text
+            'Text.Whitespace': (255, 255, 255),  # White for whitespace
         }
         
         # Convert token type to string and find best match
@@ -1266,22 +1467,144 @@ class HTMLtoLines(HTMLParser):
         # Default to white for unknown tokens
         return (255, 255, 255)
 
-    def highlight_urls_in_prose(self, text_lines):
-        """Apply URL highlighting to prose text lines."""
-        # URL highlighting works even without full color support (uses fallback styling)
-            
+    def wrap_text_preserve_urls(self, text, width):
+        """Wrap text while preserving URLs on separate lines when needed."""
         import re
-        # URL regex pattern - matches http(s):// URLs
-        url_pattern = r'https?://[^\s\)\]\}]+'
+        import textwrap
+        
+        # Find all URLs in the original text using central function
+        url_data = find_urls_in_text(text)
+        urls = [re.match(re.escape(url), text[start:end]) for url, start, end in url_data]
+        # Convert to Match objects for compatibility
+        urls = []
+        for url, start, end in url_data:
+            class MockMatch:
+                def __init__(self, text, start, end):
+                    self._text = text
+                    self._start = start
+                    self._end = end
+                def group(self): return self._text
+                def start(self): return self._start
+                def end(self): return self._end
+            urls.append(MockMatch(url, start, end))
+        
+        if not urls:
+            # No URLs, use normal wrapping
+            wrapped = textwrap.wrap(text, width, break_long_words=False, break_on_hyphens=True, expand_tabs=True)
+            if not wrapped and text.strip():
+                wrapped = textwrap.wrap(text, width, break_long_words=True)
+            return wrapped
+        
+        result_lines = []
+        current_pos = 0
+        
+        for url_match in urls:
+            # Add text before URL (if any)
+            before_text = text[current_pos:url_match.start()]
+            if before_text.strip():
+                wrapped_before = textwrap.wrap(before_text.strip(), width, break_long_words=False, break_on_hyphens=True)
+                result_lines.extend(wrapped_before)
+            
+            # Get the URL and text after it
+            url_text = url_match.group()
+            after_start = url_match.end()
+            
+            # Find text that comes after this URL (until next URL or end of text)
+            next_url = None
+            for next_match in urls[urls.index(url_match) + 1:]:
+                if next_match.start() > after_start:
+                    next_url = next_match
+                    break
+            
+            if next_url:
+                after_text = text[after_start:next_url.start()]
+            else:
+                after_text = text[after_start:]
+            
+            # If URL is long or close to width, give it its own line
+            if len(url_text) > width * 0.8:  # If URL is more than 80% of line width
+                # URL needs its own line
+                result_lines.append(f"__URLSTART__{url_text}__URLEND__")
+                current_pos = url_match.end()
+            else:
+                # Check if URL + immediate after text fits on one line
+                # Handle immediate punctuation (no space) vs words (with space)
+                immediate_after = after_text.lstrip()  # Remove leading spaces
+                first_char = immediate_after[0] if immediate_after else ""
+                
+                if first_char and first_char in '.!?,:;':
+                    # Immediate punctuation - no space needed
+                    punctuation = first_char
+                    remaining_after = immediate_after[1:]
+                    if len(url_text + punctuation) <= width:
+                        result_lines.append(f"__URLSTART__{url_text}__URLEND__{punctuation}")
+                        current_pos = after_start + (len(after_text) - len(immediate_after)) + 1
+                        continue
+                else:
+                    # Regular word - needs space
+                    immediate_after = after_text.split()[0] if after_text.strip() else ""
+                    if len(url_text + " " + immediate_after) <= width:
+                        # URL and next word fit together  
+                        result_lines.append(f"__URLSTART__{url_text}__URLEND__ {immediate_after}".strip())
+                        # Update position to skip the word we just added
+                        if immediate_after:
+                            # Find the actual position after the word (handling multiple spaces)
+                            word_end = after_text.find(immediate_after) + len(immediate_after)
+                            current_pos = after_start + word_end
+                            # Skip any trailing spaces
+                            while current_pos < len(text) and text[current_pos] == ' ':
+                                current_pos += 1
+                        else:
+                            current_pos = url_match.end()
+                    else:
+                        # URL needs its own line
+                        result_lines.append(f"__URLSTART__{url_text}__URLEND__")
+                        current_pos = url_match.end()
+        
+        # Add any remaining text after the last URL
+        remaining_text = text[current_pos:].strip()
+        if remaining_text:
+            wrapped_remaining = textwrap.wrap(remaining_text, width, break_long_words=False, break_on_hyphens=True)
+            result_lines.extend(wrapped_remaining)
+        
+        return result_lines if result_lines else ['']
+    
+    def highlight_urls_in_prose(self, text_lines):
+        """Apply URL highlighting to prose text lines using URL markers."""
+        import re
+        
         highlighted_lines = []
         
         for line in text_lines:
-            if re.search(url_pattern, line):
-                # Line contains URLs - apply highlighting
-                highlighted_line = "URL_HL:" + line
-                highlighted_lines.append(highlighted_line)
+            # Check if line contains marked URLs
+            if "__URLSTART__" in line and "__URLEND__" in line:
+                # This line contains one or more marked URLs
+                result_line = line
+                
+                # Find all marked URL sections and replace with URL_HL format
+                url_pattern = r'__URLSTART__(.*?)__URLEND__'
+                matches = list(re.finditer(url_pattern, line))
+                
+                # Process matches in reverse order to avoid position shifts
+                for match in reversed(matches):
+                    url_text = match.group(1)
+                    # Replace the marked section with URL_HL format
+                    # But we need to handle this carefully since we're in the middle of a line
+                    start_pos = match.start()
+                    end_pos = match.end()
+                    
+                    # For now, just mark the whole line as URL if it contains a URL
+                    # This is simpler and will work for most cases
+                    result_line = "URL_HL:" + line.replace("__URLSTART__", "").replace("__URLEND__", "")
+                    break  # Process only the first URL per line for simplicity
+                
+                highlighted_lines.append(result_line)
             else:
-                highlighted_lines.append(line)
+                # No marked URLs, check for regular URL patterns as fallback
+                if re.search(r'https?://', line):
+                    highlighted_lines.append("URL_HL:" + line)
+                else:
+                    highlighted_lines.append(line)
                 
         return highlighted_lines
 
@@ -1341,20 +1664,27 @@ class HTMLtoLines(HTMLParser):
             is_pref = any(idx in self.idpref for idx in original_indices)
             is_code = any(idx in self.idcode for idx in original_indices)
             is_prose = any(idx in self.idprose for idx in original_indices)
+            is_caption = any(idx in self.idcaption for idx in original_indices)
             
             if is_head:
                 # Add HEADER: prefix to preserve header info for rendering
                 centered_text = i.rjust(width//2 + len(i)//2)
                 text += ["HEADER:" + centered_text] + [""]
             elif is_inde:
-                wrapped_lines = ["   "+j for j in textwrap.wrap(i, width - 3)]
+                wrapped_lines = ["   "+j for j in self.wrap_text_preserve_urls(i, width - 3)]
                 highlighted_lines = self.highlight_urls_in_prose(wrapped_lines)
                 text += highlighted_lines + [""]
             elif is_bull:
-                tmp = textwrap.wrap(i, width - 3)
+                tmp = self.wrap_text_preserve_urls(i, width - 3)
                 bullet_lines = [" - "+j if j == tmp[0] else "   "+j for j in tmp]
                 highlighted_lines = self.highlight_urls_in_prose(bullet_lines)
                 text += highlighted_lines + [""]
+            elif is_caption:
+                # Handle listing captions with proper spacing and formatting
+                text.append("")  # Empty line before caption
+                wrapped_caption = textwrap.wrap(i, width, break_long_words=False, break_on_hyphens=True)
+                text += ["CAPTION:" + line for line in wrapped_caption]
+                text.append("")  # Empty line after caption
             elif is_pref:
                 # Apply syntax highlighting to code blocks (HTML class takes priority over heuristics)
                 if is_prose:
@@ -1373,6 +1703,7 @@ class HTMLtoLines(HTMLParser):
                     # Apply syntax highlighting to code blocks (no borders)
                     highlighted_lines = self.apply_syntax_highlighting(i, self.code_lang)
                     text.append("")  # Empty line before code
+                    text.append("")  # Extra padding before code
                     for line_text, line_colors in highlighted_lines:
                         if line_text:
                             # Store syntax-highlighted code as-is without wrapping to preserve formatting
@@ -1381,21 +1712,332 @@ class HTMLtoLines(HTMLParser):
                             # Empty line within code block - mark as syntax highlighted to preserve context
                             text.append("SYNTAX_HL:|[]")
                     text.append("")  # Empty line after code block
+                    text.append("")  # Extra padding after code
                 else:
                     # Regular preformatted text (no syntax highlighting) - preserve original formatting
                     tmp = i.splitlines()
                     # Don't wrap preformatted text - it should maintain its original formatting
-                    text += ["   "+line for line in tmp] + [""]
+                    text.append("")  # Extra padding before preformatted text
+                    text += ["   "+line for line in tmp]
+                    text.append("")  # Original empty line after preformatted text
+                    text.append("")  # Extra padding after preformatted text
             else:
-                wrapped_lines = textwrap.wrap(i, width)
+                # Use URL-aware text wrapping to preserve URLs
+                wrapped_lines = self.wrap_text_preserve_urls(i, width)
                 highlighted_lines = self.highlight_urls_in_prose(wrapped_lines)
                 background_lines = self.add_table_background(highlighted_lines)
                 text += background_lines + [""]
-        return text, self.imgs
+        return text, self.imgs, self.img_alts
 
+
+def show_initial_help_message(stdscr, rows, cols):
+    """Show initial help message at bottom of screen on startup - matches URL/images hint styling."""
+    message = " ? for help "
+    message_len = len(message)
+    
+    # Position at bottom center
+    start_col = max(0, (cols - message_len) // 2)
+    
+    # Protect against resize/dimension issues - use same logic as show_persistent_hint
+    try:
+        # Verify we have valid dimensions before attempting to draw
+        if rows <= 0 or cols <= 0 or start_col >= cols or start_col + message_len > cols:
+            return
+        
+        # Determine current color scheme - same logic as show_persistent_hint
+        current_bg_pair = curses.pair_number(stdscr.getbkgd())
+        is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
+        
+        # Show hint with appropriate colors - same as URL/images hints
+        if COLORSUPPORT:
+            try:
+                if is_light_scheme:
+                    # Light scheme: light text on dark background
+                    hint_pair = get_color_pair((255, 255, 255), (64, 64, 64))  # White on dark gray
+                else:
+                    # Dark scheme: dark text on light background  
+                    hint_pair = get_color_pair((0, 0, 0), (200, 200, 200))  # Black on light gray
+                    
+                if hint_pair > 0:
+                    stdscr.addstr(rows - 1, start_col, message, curses.color_pair(hint_pair))
+                else:
+                    # Fallback to reverse video
+                    stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+            except:
+                # Fallback to reverse video
+                stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+        else:
+            # No color support, use reverse video
+            stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+    except:
+        # Silently fail if screen dimensions are unstable during resize
+        pass
+
+def show_persistent_hint(stdscr, rows, cols, has_urls, has_images):
+    """Show persistent hint at bottom of screen for URLs and/or images."""
+    # Build message based on what's available
+    if has_urls and has_images:
+        message = " Press 'u' for URLs | Press 'i' for images "
+    elif has_urls:
+        message = " Press 'u' to access URLs "
+    elif has_images:
+        message = " Press 'i' to access images "
+    else:
+        return  # Nothing to show
+    
+    message_len = len(message)
+    
+    # Position at bottom center
+    start_col = max(0, (cols - message_len) // 2)
+    
+    # Protect against resize/dimension issues - try to show hint but don't crash if screen is unstable
+    try:
+        # Verify we have valid dimensions before attempting to draw
+        if rows <= 0 or cols <= 0 or start_col >= cols or start_col + message_len > cols:
+            return
+        
+        # Determine current color scheme
+        current_bg_pair = curses.pair_number(stdscr.getbkgd())
+        is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
+        
+        # Show hint with appropriate colors
+        if COLORSUPPORT:
+            try:
+                if is_light_scheme:
+                    # Light scheme: light text on dark background
+                    hint_pair = get_color_pair((255, 255, 255), (64, 64, 64))  # White on dark gray
+                else:
+                    # Dark scheme: dark text on light background  
+                    hint_pair = get_color_pair((0, 0, 0), (200, 200, 200))  # Black on light gray
+                    
+                if hint_pair > 0:
+                    stdscr.addstr(rows - 1, start_col, message, curses.color_pair(hint_pair))
+                else:
+                    # Fallback to reverse video
+                    stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+            except:
+                # Fallback to reverse video
+                stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+        else:
+            # No color support, use reverse video
+            stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+    except:
+        # Silently fail if screen dimensions are unstable during resize
+        pass
+
+def find_urls_in_text(text):
+    """Find all URLs in text using whitelist-based pattern.
+    Returns list of (url, start_pos, end_pos) tuples."""
+    import re
+    
+    # Whitelist-based URL pattern: protocol + domain + optional port + optional path + optional query string
+    # Includes query strings but excludes fragments
+    # Path and query must end with alphanumeric or specific safe characters, not punctuation
+    url_pattern = r'https?://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/[a-zA-Z0-9._/-]*)?(?:\?[a-zA-Z0-9._/\-~&=+%]*[a-zA-Z0-9_/\-~&=+%])?'
+    
+    urls = []
+    for match in re.finditer(url_pattern, text):
+        urls.append((match.group(), match.start(), match.end()))
+    return urls
+
+def check_urls_in_visible_area(src_lines, y, rows):
+    """Check if there are URLs in the currently visible area."""
+    # Check visible lines for URLs
+    for line in src_lines[y:y+rows]:
+        if find_urls_in_text(line):
+            return True
+    return False
+
+def check_images_in_visible_area(src_lines, y, rows):
+    """Check if there are images in the currently visible area."""
+    import re
+    
+    # Check visible lines for images
+    for line in src_lines[y:y+rows]:
+        # Check for both unreplaced markers and rendered image lines
+        if line.startswith("IMG_LINE:") or re.search(r'\[IMG:\d+\]', line):
+            return True
+    return False
+
+def extract_figure_number(text):
+    """Extract figure number from text like 'Figure 1.2', 'Fig 3', etc."""
+    if not text:
+        return None
+    
+    import re
+    
+    # Patterns for figure references - include hyphens and dots
+    patterns = [
+        r'(?:Figure|Fig\.?)\s+(\d+(?:[.\-]\d+)*)',  # Figure 1, Fig. 2.3, Fig 3-6, etc.
+        r'(?:Listing|List\.?)\s+(\d+(?:[.\-]\d+)*)',  # Listing 1, List. 2.3, List 3-6, etc.  
+        r'(?:Table|Tab\.?)\s+(\d+(?:[.\-]\d+)*)',   # Table 1, Tab. 2.3, Table 3-6, etc.
+        r'(?:Diagram|Chart|Graph|Illustration)\s+(\d+(?:[.\-]\d+)*)',  # Other figure types
+        r'(\d+(?:[.\-]\d+)*)\s*[:-]\s*',  # Leading number like "1.2: Title", "3-6: Title", etc.
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, img_line_num=None):
+    """Get enhanced label for image including figure number if available."""
+    import re
+    import os
+    
+    figure_number = None
+    base_label = None
+    
+    # First try to get figure number from alt text
+    if img_idx < len(img_alts) and img_alts[img_idx]:
+        alt_text = img_alts[img_idx]
+        figure_number = extract_figure_number(alt_text)
+        base_label = alt_text
+    
+    # If no figure number yet, search nearby lines for captions
+    if not figure_number and img_line_num is not None:
+        # Search a few lines before and after the image for captions
+        search_range = 3  # Reduced range to be more specific to each image
+        start = max(0, img_line_num - search_range)
+        end = min(len(src_lines), img_line_num + search_range)
+        
+        # Look for captions first (more reliable)
+        for i in range(start, end):
+            if i < len(src_lines):
+                line = src_lines[i]
+                if line.startswith("CAPTION:"):
+                    caption_text = line[8:]  # Remove "CAPTION:" prefix
+                    figure_number = extract_figure_number(caption_text)
+                    if figure_number:
+                        base_label = caption_text.strip()
+                        break
+        
+        # If still no figure number, check regular lines but prioritize lines closer to the image
+        if not figure_number:
+            # Check lines in order of proximity to image
+            distances = []
+            for i in range(start, end):
+                if i < len(src_lines):
+                    distances.append((abs(i - img_line_num), i))
+            distances.sort()  # Sort by distance from image
+            
+            for _, i in distances:
+                line = src_lines[i]
+                if not line.startswith("CAPTION:"):  # Skip captions (already checked)
+                    figure_number = extract_figure_number(line)
+                    if figure_number:
+                        base_label = line.strip()
+                        break
+    
+    # Additional check: try to extract figure number from filename as last resort
+    if not figure_number:
+        filename = os.path.basename(img_path)
+        figure_number = extract_figure_number(filename)
+        if figure_number and not base_label:
+            base_label = filename
+    
+    # Debug output for troubleshooting
+    if os.getenv('TERMBOOK_DEBUG_FIGURES'):
+        import sys
+        print(f"DEBUG: Image {img_idx} ({os.path.basename(img_path)}) -> Figure: '{figure_number}' from '{base_label}' at line {img_line_num}", file=sys.stderr)
+    
+    # Fallback to filename
+    if not base_label:
+        base_label = os.path.basename(img_path)
+    
+    # Create enhanced label
+    if figure_number:
+        # Clean up the base label for display
+        if base_label.startswith("CAPTION:"):
+            base_label = base_label[8:].strip()
+        
+        # Try to get a short descriptive part after the figure number
+        clean_label = re.sub(r'^(?:Figure|Fig\.?|Listing|List\.?|Table|Tab\.?|Diagram|Chart|Graph|Illustration)\s+\d+(?:[.\-]\d+)*\s*[:-]?\s*', '', base_label, flags=re.IGNORECASE)
+        
+        if clean_label and clean_label != base_label and len(clean_label.strip()) > 3:
+            # Use figure number + shortened description
+            short_desc = clean_label.strip()[:20]  # Limit description length
+            if len(clean_label.strip()) > 20:
+                short_desc += "..."
+            return f"Fig {figure_number}: {short_desc}"
+        else:
+            # Just figure number
+            return f"Figure {figure_number}"
+    
+    # No figure number found, use original label logic
+    if base_label and base_label != os.path.basename(img_path):
+        # Use alt text, truncated if needed
+        return base_label[:30] + ("..." if len(base_label) > 30 else "")
+    else:
+        # Use filename
+        return os.path.basename(img_path)
+
+def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
+    """Get images that are visible or overlapping with the current viewport.
+    Uses precise image line mapping if available."""
+    import re
+    
+    if not imgs:
+        return []
+    
+    visible_images = []
+    seen_indices = set()
+    
+    # Define viewport with small overlap 
+    viewport_start = max(0, y - 2)
+    viewport_end = min(len(src_lines), y + rows + 2)
+    
+    # Use precise image line mapping if available
+    if image_line_map and len(image_line_map) == len(src_lines):
+        # Scan visible lines and check image mapping
+        for line_num in range(viewport_start, viewport_end):
+            if line_num < len(image_line_map):
+                img_idx = image_line_map[line_num]
+                if img_idx is not None and img_idx < len(imgs) and img_idx not in seen_indices:
+                    visible_images.append((imgs[img_idx], line_num, img_idx))
+                    seen_indices.add(img_idx)
+    else:
+        # Fallback to old method - scan for image markers
+        for line_num in range(viewport_start, viewport_end):
+            if line_num >= len(src_lines):
+                break
+                
+            line = src_lines[line_num]
+            
+            # Check for [IMG:n] markers (unrendered images)
+            img_match = re.search(r'\[IMG:(\d+)\]', line)
+            if img_match:
+                img_idx = int(img_match.group(1))
+                if img_idx < len(imgs) and img_idx not in seen_indices:
+                    visible_images.append((imgs[img_idx], line_num, img_idx))
+                    seen_indices.add(img_idx)
+            
+            # Check for IMG_LINE: markers (rendered images)
+            elif line.startswith("IMG_LINE:"):
+                # Without mapping, we can't determine which specific image this is
+                pass
+        
+        # If we found IMG_LINE markers but no [IMG:n] markers, return all images
+        has_rendered_images = any(
+            src_lines[i].startswith("IMG_LINE:") 
+            for i in range(viewport_start, viewport_end) 
+            if i < len(src_lines)
+        )
+        
+        if has_rendered_images and not visible_images and imgs:
+            for img_idx, img_path in enumerate(imgs):
+                if img_idx not in seen_indices:
+                    visible_images.append((img_path, y, img_idx))
+    
+    # Sort by line position
+    visible_images.sort(key=lambda x: x[1])
+    
+    return visible_images
 
 def loadstate():
-    global STATE, STATEFILE
+    global STATE, STATEFILE, BOOKMARKSFILE
     if os.getenv("HOME") is not None:
         STATEFILE = os.path.join(os.getenv("HOME"), ".termbook")
         if os.path.isdir(os.path.join(os.getenv("HOME"), ".config")):
@@ -1406,14 +2048,24 @@ def loadstate():
                     os.remove(os.path.join(configdir, "config"))
                 shutil.move(STATEFILE, os.path.join(configdir, "config"))
             STATEFILE = os.path.join(configdir, "config")
+            BOOKMARKSFILE = os.path.join(configdir, "bookmarks.json")
+        else:
+            BOOKMARKSFILE = os.path.join(os.getenv("HOME"), ".termbook_bookmarks.json")
     elif os.getenv("USERPROFILE") is not None:
         STATEFILE = os.path.join(os.getenv("USERPROFILE"), ".termbook")
+        BOOKMARKSFILE = os.path.join(os.getenv("USERPROFILE"), ".termbook_bookmarks.json")
     else:
         STATEFILE = os.devnull
+        BOOKMARKSFILE = os.devnull
 
     if os.path.exists(STATEFILE):
         with open(STATEFILE, "r") as f:
             STATE = json.load(f)
+    
+    # Load and clean up bookmarks
+    load_bookmarks()
+    
+    # Note: URL hint is now persistent and shown whenever URLs are visible
 
 
 def savestate(file, index, width, pos, pctg ):
@@ -1424,9 +2076,455 @@ def savestate(file, index, width, pos, pctg ):
     STATE[file]["width"] = str(width)
     STATE[file]["pos"] = str(pos)
     STATE[file]["pctg"] = str(pctg)
+    
+    # Note: URL hint is now persistent and shown whenever URLs are visible
+    
     with open(STATEFILE, "w") as f:
         json.dump(STATE, f, indent=4)
 
+
+def load_bookmarks():
+    """Load global bookmarks from file and clean up missing books"""
+    global GLOBAL_BOOKMARKS
+    GLOBAL_BOOKMARKS = []
+    
+    if not os.path.exists(BOOKMARKSFILE):
+        return
+    
+    try:
+        with open(BOOKMARKSFILE, 'r', encoding='utf-8') as f:
+            import json
+            data = json.load(f)
+            valid_bookmarks = []
+            
+            for bookmark in data:
+                if 'path' in bookmark and os.path.exists(bookmark['path']):
+                    valid_bookmarks.append(bookmark)
+            
+            GLOBAL_BOOKMARKS = valid_bookmarks
+            
+            # Save cleaned list back if we removed any
+            if len(valid_bookmarks) < len(data):
+                save_bookmarks()
+    except:
+        GLOBAL_BOOKMARKS = []
+
+def save_bookmarks():
+    """Save global bookmarks to file"""
+    try:
+        os.makedirs(os.path.dirname(BOOKMARKSFILE), exist_ok=True)
+        with open(BOOKMARKSFILE, 'w', encoding='utf-8') as f:
+            import json
+            json.dump(GLOBAL_BOOKMARKS, f, indent=2, ensure_ascii=False)
+    except:
+        pass
+
+# =============================================================================
+# UNIFIED MODAL SYSTEM
+# =============================================================================
+
+class Modal:
+    """Unified modal system for all dialogs"""
+    _active_modal = None
+    
+    @classmethod
+    def is_active(cls):
+        return cls._active_modal is not None
+    
+    @classmethod
+    def set_active(cls, modal_name):
+        cls._active_modal = modal_name
+    
+    @classmethod
+    def clear_active(cls):
+        cls._active_modal = None
+    
+    @classmethod
+    def handle_resize(cls):
+        """Clear any active modal on resize and return to main reader"""
+        if cls._active_modal:
+            cls._active_modal = None
+            return True
+        return False
+    
+    @staticmethod
+    def create_dialog(stdscr, width, height, title=""):
+        """Create a centered dialog window"""
+        rows, cols = stdscr.getmaxyx()
+        start_y = (rows - height) // 2
+        start_x = (cols - width) // 2
+        
+        dialog = curses.newwin(height, width, start_y, start_x)
+        dialog.box()
+        if title:
+            dialog.addstr(0, 2, title)
+        dialog.keypad(True)
+        return dialog
+    
+    @staticmethod
+    def get_immediate_key(dialog):
+        """Get key input with immediate 'q' handling - no waiting for sequences"""
+        # Set nodelay mode to avoid blocking on escape sequences
+        dialog.nodelay(True)
+        try:
+            key = dialog.getch()
+            if key == -1:  # No key pressed
+                dialog.nodelay(False)
+                key = dialog.getch()  # Wait for actual key
+                
+            # If we got 'q', return immediately without waiting for sequences
+            if key == ord('q'):
+                return key
+                
+            dialog.nodelay(False)
+            return key
+        except:
+            dialog.nodelay(False)
+            return dialog.getch()
+    
+    @staticmethod
+    def destroy_dialog(stdscr, dialog):
+        """Completely destroy dialog and refresh screen"""
+        dialog.clear()
+        dialog.refresh()
+        del dialog
+        stdscr.clear()
+        stdscr.refresh()
+        Modal.clear_active()
+    
+    @staticmethod
+    def input_dialog(stdscr, width, height, title, prompt, max_length=50):
+        """Generic input dialog - only 'q' and Enter are commands"""
+        if Modal.is_active():
+            return None
+        
+        Modal.set_active(f"input_{title}")
+        
+        dialog = Modal.create_dialog(stdscr, width, height, title)
+        dialog.addstr(1, 2, prompt)
+        dialog.refresh()
+        
+        curses.curs_set(1)
+        curses.noecho()
+        
+        input_text = ""
+        prompt_len = len(prompt) + 2
+        
+        while True:
+            dialog.move(1, prompt_len + len(input_text))
+            dialog.refresh()
+            
+            key = Modal.get_immediate_key(dialog)
+            
+            # ONLY 'q' and Enter are treated as commands
+            if key == ord('q'):  # q - cancel
+                curses.curs_set(0)
+                curses.flushinp()
+                Modal.destroy_dialog(stdscr, dialog)
+                return None
+            elif key in (10, 13):  # Enter - accept
+                curses.curs_set(0)
+                curses.flushinp()
+                Modal.destroy_dialog(stdscr, dialog)
+                return input_text if input_text else None
+            elif key in (8, 127, curses.KEY_BACKSPACE):  # Backspace
+                if input_text:
+                    input_text = input_text[:-1]
+                    dialog.move(1, prompt_len + len(input_text))
+                    dialog.addch(' ')
+            elif 32 <= key <= 126 and len(input_text) < max_length:  # All printable chars
+                input_text += chr(key)
+                dialog.addch(key)
+    
+    @staticmethod
+    def message_dialog(stdscr, width, height, title, message):
+        """Simple message dialog - only 'q' to close"""
+        if Modal.is_active():
+            return None
+        
+        Modal.set_active(f"message_{title}")
+        
+        dialog = Modal.create_dialog(stdscr, width, height, title)
+        
+        # Center and wrap the message if needed
+        lines = []
+        words = message.split()
+        current_line = ""
+        for word in words:
+            if len(current_line) + len(word) + 1 <= width - 4:
+                current_line = current_line + " " + word if current_line else word
+            else:
+                if current_line:
+                    lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+        
+        # Display the message centered vertically
+        start_y = max(1, (height - len(lines) - 2) // 2)
+        for i, line in enumerate(lines):
+            centered_line = line.center(width - 4)
+            dialog.addstr(start_y + i, 2, centered_line)
+        
+        # Add help text at bottom
+        help_text = "q: Close"
+        format_help_text_with_colors(dialog, height - 2, 2, help_text, width - 4)
+        
+        dialog.refresh()
+        
+        while True:
+            key = Modal.get_immediate_key(dialog)
+            if key == ord('q'):  # q - close
+                curses.flushinp()
+                Modal.destroy_dialog(stdscr, dialog)
+                return None
+            elif key == curses.KEY_RESIZE:
+                curses.flushinp()
+                Modal.destroy_dialog(stdscr, dialog)
+                return curses.KEY_RESIZE
+    
+    @staticmethod
+    def list_dialog(stdscr, width, height, title, items, current=0, help_text=None):
+        """Generic list selection dialog"""
+        if Modal.is_active():
+            return None
+        
+        Modal.set_active(f"list_{title}")
+        
+        while True:
+            dialog = Modal.create_dialog(stdscr, width, height, title)
+            
+            # Display items
+            display_height = height - 4
+            start_idx = max(0, current - display_height // 2)
+            end_idx = min(len(items), start_idx + display_height)
+            
+            for i in range(start_idx, end_idx):
+                y = 2 + (i - start_idx)
+                attr = curses.A_REVERSE if i == current else 0
+                item_text = str(items[i])[:width-4]
+                dialog.addstr(y, 2, item_text, attr)
+            
+            if help_text is None:
+                help_text = "Enter: Select | q: Cancel"
+            max_help_width = width - 4
+            format_help_text_with_colors(dialog, height-2, 2, help_text, max_help_width)
+            dialog.refresh()
+            
+            key = Modal.get_immediate_key(dialog)
+                
+            if key == ord('q'):  # q to exit
+                Modal.destroy_dialog(stdscr, dialog)
+                return None
+            elif key in (10, 13):  # Enter
+                selected = items[current] if current < len(items) else None
+                Modal.destroy_dialog(stdscr, dialog)
+                return selected
+            elif key == curses.KEY_UP and current > 0:
+                current -= 1
+            elif key == curses.KEY_DOWN and current < len(items) - 1:
+                current += 1
+            elif key == curses.KEY_RESIZE:
+                Modal.destroy_dialog(stdscr, dialog)
+                return curses.KEY_RESIZE
+
+def offer_whole_book_search(stdscr, search_term, ebook, current_index, current_y, width):
+    """Ask user if they want to search the whole book"""
+    if Modal.is_active():
+        return None
+    
+    Modal.set_active("whole_book_search")
+    
+    dialog = Modal.create_dialog(stdscr, 60, 5, "")
+    message = f"'{search_term}' not found in current chapter."
+    prompt = "Search whole book? (y/n): "
+    
+    dialog.addstr(1, 2, message[:56])  # Truncate if too long
+    dialog.addstr(3, 2, prompt)
+    dialog.refresh()
+    
+    while True:
+        key = Modal.get_immediate_key(dialog)
+        if key in [ord('y'), ord('Y')]:
+            # Perform whole-book search
+            Modal.destroy_dialog(stdscr, dialog)
+            return search_whole_book(stdscr, search_term, ebook, current_index, current_y, width)
+        elif key in [ord('n'), ord('N'), ord('q'), 27]:  # n, N, q, or Esc
+            Modal.destroy_dialog(stdscr, dialog)
+            return None
+        elif key == curses.KEY_RESIZE:
+            Modal.destroy_dialog(stdscr, dialog)
+            return curses.KEY_RESIZE
+
+def apply_search_highlighting(pad, n, x, text, default_attr=0):
+    """Apply search highlighting to text if CURRENT_SEARCH_TERM is set"""
+    global CURRENT_SEARCH_TERM
+    
+    # DEBUG: Always log function calls
+    try:
+        with open('/tmp/search_debug.log', 'a') as f:
+            f.write(f"FUNCTION_CALL: apply_search_highlighting called with text='{text[:30]}...', CURRENT_SEARCH_TERM='{CURRENT_SEARCH_TERM}'\n")
+    except:
+        pass
+    
+    if not CURRENT_SEARCH_TERM or not text:
+        # No search term or no text - just render normally
+        try:
+            pad.addstr(n, x, text, default_attr)
+        except:
+            pass
+        return
+        
+    # Apply search highlighting
+    import re
+    search_pattern = re.escape(CURRENT_SEARCH_TERM)
+    last_pos = 0
+    
+    # DEBUG: Log that we're applying highlighting
+    try:
+        with open('/tmp/search_debug.log', 'a') as f:
+            f.write(f"APPLY_HIGHLIGHT: Checking '{text[:30]}...' for '{CURRENT_SEARCH_TERM}'\n")
+    except:
+        pass
+    
+    for match in re.finditer(search_pattern, text, re.IGNORECASE):
+        # Add text before match
+        if match.start() > last_pos:
+            before_text = text[last_pos:match.start()]
+            try:
+                pad.addstr(n, x + last_pos, before_text, default_attr)
+            except:
+                pass
+        
+        # Add highlighted match
+        match_text = match.group()
+        try:
+            if COLORSUPPORT:
+                # Create search highlight color
+                search_color_pair = 250
+                try:
+                    # Determine color scheme
+                    current_bg_pair = curses.pair_number(pad.getbkgd())
+                    is_light_scheme = current_bg_pair == 3
+                    
+                    if is_light_scheme:
+                        # Light mode: black text on cyan background
+                        curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_CYAN)
+                    else:
+                        # Dark modes: black text on ultra bright fluorescent yellow background
+                        curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+                    
+                    pad.addstr(n, x + match.start(), match_text, curses.color_pair(search_color_pair))
+                    
+                    # DEBUG: Log successful highlight
+                    try:
+                        with open('/tmp/search_debug.log', 'a') as f:
+                            f.write(f"HIGHLIGHT_SUCCESS: Highlighted '{match_text}' at position {match.start()}\n")
+                    except:
+                        pass
+                except:
+                    # Fallback to reverse video
+                    pad.addstr(n, x + match.start(), match_text, curses.A_REVERSE | curses.A_BOLD)
+            else:
+                pad.addstr(n, x + match.start(), match_text, curses.A_REVERSE | curses.A_BOLD)
+        except:
+            pass
+            
+        last_pos = match.end()
+    
+    # Add remaining text after last match
+    if last_pos < len(text):
+        remaining_text = text[last_pos:]
+        try:
+            pad.addstr(n, x + last_pos, remaining_text, default_attr)
+        except:
+            pass
+
+def search_whole_book(stdscr, search_term, ebook, current_index, current_y, width):
+    """Search for term across all chapters, navigating chapter by chapter"""
+    total_chapters = len(ebook.contents)
+    
+    # Start searching from the next chapter (wrapping around)
+    next_chapter = (current_index + 1) % total_chapters
+    
+    # Navigate to the next chapter and search there
+    # This will cause the reader to restart with the new chapter and search term set
+    chapter_offset = next_chapter - current_index
+    
+    # Show a brief message
+    rows, cols = stdscr.getmaxyx()
+    stdscr.addstr(rows-1, 0, f" Searching chapter {next_chapter + 1}... ", curses.A_REVERSE)
+    stdscr.refresh()
+    curses.napms(500)  # Brief pause to show the message
+    
+    return (chapter_offset, width, 0, None)
+
+def search_dialog(stdscr):
+    """Specialized search dialog - Enter to search or exit if blank"""
+    if Modal.is_active():
+        return None
+    
+    Modal.set_active("search_input")
+    
+    dialog = Modal.create_dialog(stdscr, 60, 3, "")
+    prompt = "Search: "
+    dialog.addstr(1, 2, prompt)
+    dialog.refresh()
+    
+    curses.curs_set(1)
+    curses.noecho()
+    
+    input_text = ""
+    prompt_len = len(prompt) + 2
+    
+    while True:
+        dialog.move(1, prompt_len + len(input_text))
+        dialog.refresh()
+        
+        key = Modal.get_immediate_key(dialog)
+        
+        if key in (10, 13):  # Enter - search if text, exit if blank
+            curses.curs_set(0)
+            curses.flushinp()
+            Modal.destroy_dialog(stdscr, dialog)
+            return input_text if input_text else None  # Return text or None to exit
+        elif key in (8, 127, curses.KEY_BACKSPACE):  # Backspace
+            if input_text:
+                input_text = input_text[:-1]
+                dialog.move(1, prompt_len + len(input_text))
+                dialog.addch(' ')
+        elif 32 <= key <= 126 and len(input_text) < 40:  # All printable chars
+            input_text += chr(key)
+            dialog.addch(chr(key))
+        # Note: No 'q' handling - only Enter to search or exit
+
+def add_bookmark(ebook, chapter_index, chapter_title, position, pctg):
+    """Add a new global bookmark"""
+    global GLOBAL_BOOKMARKS
+    import datetime
+    
+    # Get book title, fallback to filename
+    try:
+        book_title = ebook.get_meta()[0][1] if ebook.get_meta() else os.path.basename(ebook.path)
+        # Clean up title
+        book_title = re.sub(r'<[^>]*>', '', book_title).strip()
+        if not book_title:
+            book_title = os.path.basename(ebook.path)
+    except:
+        book_title = os.path.basename(ebook.path)
+    
+    bookmark = {
+        'path': ebook.path,
+        'book_title': book_title,
+        'chapter_index': chapter_index,
+        'chapter_title': chapter_title,
+        'position': position,
+        'percentage': pctg,
+        'created': datetime.datetime.now().isoformat()
+    }
+    
+    GLOBAL_BOOKMARKS.append(bookmark)
+    save_bookmarks()
 
 def pgup(pos, winhi, preservedline=0, c=1):
     if pos >= (winhi - preservedline) * c:
@@ -1452,210 +2550,480 @@ def pgend(tot, winhi):
         return 0
 
 
-def toc(stdscr, src, index):
+def handle_terminal_resize():
+    """Handle delayed terminal resize - called after resize timer expires"""
+    global RESIZE_REQUESTED
+    RESIZE_REQUESTED = True
+
+
+def schedule_resize():
+    """Schedule a terminal resize after a delay to avoid rapid re-renders"""
+    global RESIZE_TIMER
+    
+    # Cancel any existing timer
+    if RESIZE_TIMER:
+        RESIZE_TIMER.cancel()
+    
+    # Schedule new timer
+    RESIZE_TIMER = threading.Timer(RESIZE_DELAY, handle_terminal_resize)
+    RESIZE_TIMER.start()
+
+
+def check_for_resize():
+    """Check if a resize has been requested and return True if so"""
+    global RESIZE_REQUESTED
+    if RESIZE_REQUESTED:
+        RESIZE_REQUESTED = False
+        return True
+    return False
+
+
+def check_terminal_size_changed(stdscr):
+    """Check if terminal size has changed since last check"""
+    global LAST_TERMINAL_SIZE
+    
+    try:
+        current_size = stdscr.getmaxyx()
+        if LAST_TERMINAL_SIZE == (0, 0):
+            # First time - just record the size
+            LAST_TERMINAL_SIZE = current_size
+            return False
+        
+        if current_size != LAST_TERMINAL_SIZE:
+            # Size changed - schedule delayed resize and update tracking
+            LAST_TERMINAL_SIZE = current_size
+            schedule_resize()
+            return True
+            
+        return False
+    except:
+        return False
+
+
+def cleanup_resize_timer():
+    """Cancel any pending resize timer on exit"""
+    global RESIZE_TIMER
+    if RESIZE_TIMER:
+        RESIZE_TIMER.cancel()
+
+
+# Register cleanup function
+atexit.register(cleanup_resize_timer)
+
+
+def is_page_empty(src_lines, start_y, rows):
+    """Check if a page/screen contains any visible content"""
+    end_y = min(start_y + rows, len(src_lines))
+    
+    for i in range(start_y, end_y):
+        if i < len(src_lines):
+            line = src_lines[i].strip()
+            # Skip various prefixed lines that are considered "content"
+            if line and not line.startswith(('IMG_LINE:', 'SYNTAX_HL:|', 'HEADER:', 'CAPTION:')):
+                # Check if it's just formatting or actually has readable content
+                if any(c.isalnum() for c in line):
+                    return False
+    return True
+
+
+def skip_empty_pages_forward(src_lines, y, rows, totlines, max_skips=10):
+    """Skip forward through empty pages until content is found or limit reached"""
+    original_y = y
+    skips = 0
+    
+    while skips < max_skips and y < totlines - rows:
+        if is_page_empty(src_lines, y, rows):
+            y += rows
+            skips += 1
+        else:
+            break
+    
+    # If we skipped and found content, return new position
+    # If no content found after max_skips, return original position
+    return y if skips > 0 and y < totlines - rows else original_y
+
+
+def skip_empty_pages_backward(src_lines, y, rows, max_skips=10):
+    """Skip backward through empty pages until content is found or limit reached"""
+    original_y = y
+    skips = 0
+    
+    while skips < max_skips and y > 0:
+        if is_page_empty(src_lines, y, rows):
+            y = max(0, y - rows)
+            skips += 1
+        else:
+            break
+    
+    # If we skipped and found content, return new position
+    # If no content found after max_skips, return original position
+    return y if skips > 0 and y >= 0 else original_y
+
+
+def bookmarks(stdscr):
+    """Display and manage global bookmarks using unified modal system"""
+    global GLOBAL_BOOKMARKS
+    
+    if not GLOBAL_BOOKMARKS:
+        # No bookmarks - show simple message dialog
+        return Modal.message_dialog(stdscr, 60, 5, "Bookmarks (0 saved)", 
+                                   "No bookmarks saved. Press 's' while reading to save.")
+    
+    # Create list of formatted bookmark strings
+    bookmark_items = []
     rows, cols = stdscr.getmaxyx()
-    hi, wi = rows - 4, cols - 4
-    Y, X = 2, 2
-    oldindex = index
-    toc = curses.newwin(hi, wi, Y, X)
-    if COLORSUPPORT:
-        toc.bkgd(stdscr.getbkgd())
-
-    toc.box()
-    toc.keypad(True)
-    toc.addstr(1,2, "Table of Contents")
-    toc.addstr(2,2, "-----------------")
-    key_toc = 0
-
-    totlines = len(src)
-    toc.refresh()
-    pad = curses.newpad(totlines, wi - 2 )
-    if COLORSUPPORT:
-        pad.bkgd(stdscr.getbkgd())
-
-    pad.keypad(True)
-
-    padhi = rows - 5 - Y - 4 + 1
-    y = 0
-    if index in range(padhi//2, totlines - padhi//2):
-        y = index - padhi//2 + 1
-    d = len(str(totlines))
-    span = []
-
-    for n, i in enumerate(src):
-        # strs = "  " + str(n+1).rjust(d) + " " + i[0]
-        strs = "  " + i
-        strs = strs[0:wi-3]
-        pad.addstr(n, 0, strs)
-        span.append(len(strs))
-
-    countstring = ""
-    while key_toc not in TOC|QUIT:
-        if countstring == "":
-            count = 1
+    modal_width = min(cols - 4, 100)
+    available_width = modal_width - 4  # Account for padding
+    
+    for i, bookmark in enumerate(GLOBAL_BOOKMARKS):
+        # Format timestamp
+        timestamp = ""
+        if 'created' in bookmark:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(bookmark['created'])
+                timestamp = dt.strftime("%m/%d %H:%M")
+            except:
+                timestamp = ""
+        
+        # Get position percentage
+        position_pct = bookmark.get('percentage', 0.0)
+        position_str = f"{position_pct:.0f}%"
+        
+        # Calculate space for fixed elements and proper spacing
+        num_field = f"{i+1:2d}."
+        
+        # Check if container is narrow (less than 50 chars available)
+        if available_width < 50 and timestamp:
+            # Narrow container: show only timestamp and position
+            display_line = f"{num_field} {timestamp} {position_str:>4s}"
         else:
-            count = int(countstring)
-        if key_toc in range(48, 58): # i.e., k is a numeral
-            countstring = countstring + chr(key_toc)
-        else:
-            if key_toc in SCROLL_UP|SCROLL_UP_K or key_toc in PAGE_UP:
-                index -= count
-                if index < 0:
-                    index = 0
-            elif key_toc in SCROLL_DOWN|SCROLL_DOWN_J or key_toc in PAGE_DOWN:
-                index += count
-                if index + 1 >= totlines:
-                    index = totlines - 1
-            elif key_toc in FOLLOW:
-                # if index == oldindex:
-                #     break
-                return index
-            # elif key_toc in PAGE_UP:
-            #     index -= 3
-            #     if index < 0:
-            #         index = 0
-            # elif key_toc in PAGE_DOWN:
-            #     index += 3
-            #     if index >= totlines:
-            #         index = totlines - 1
-            elif key_toc in CH_HOME:
-                index = 0
-            elif key_toc in CH_END:
-                index = totlines - 1
-            elif key_toc in {curses.KEY_RESIZE}|HELP|META:
-                return key_toc
-            countstring = ""
-
-        while index not in range(y, y+padhi):
-            if index < y:
-                y -= 1
+            # Normal width: show all fields with proper spacing
+            # Reserve space for position (right-aligned)
+            position_space = 5  # "100%" is max 4 chars + 1 space
+            
+            # Reserve space for timestamp (left side after number)
+            timestamp_space = 11 if timestamp else 0  # "12/31 23:59" + 1 space
+            
+            # Calculate remaining space for title and chapter with proper spacing
+            # Leave extra space for safety to prevent overrun
+            reserved_space = len(num_field) + 1 + timestamp_space + position_space + 2  # +2 for safety margin
+            content_width = max(20, available_width - reserved_space)  # Ensure minimum content width
+            
+            # Split content space: 40% title, 60% chapter, with reasonable minimums
+            title_space = max(8, min(20, int(content_width * 0.4)))  # Cap title at 20 chars
+            chapter_space = max(8, content_width - title_space)
+            
+            # Truncate title and chapter to fit
+            book_title = bookmark.get('book_title', 'Unknown')
+            if len(book_title) > title_space:
+                book_title = book_title[:title_space-1] + "…"
             else:
-                y += 1
+                book_title = book_title.ljust(title_space)
+            
+            chapter_title = bookmark.get('chapter_title', 'Chapter ?')
+            if len(chapter_title) > chapter_space:
+                chapter_title = chapter_title[:chapter_space-1] + "…"
+            else:
+                chapter_title = chapter_title.ljust(chapter_space)
+            
+            # Create spaced display line with proper alignment
+            if timestamp:
+                display_line = f"{num_field} {timestamp} {book_title} {chapter_title} {position_str:>4s}"
+            else:
+                # No timestamp, give more space to content  
+                available_for_content = content_width + timestamp_space
+                title_space = max(10, min(25, int(available_for_content * 0.4)))  # Cap title at 25 chars
+                chapter_space = max(8, available_for_content - title_space)
+                
+                book_title = bookmark.get('book_title', 'Unknown')
+                if len(book_title) > title_space:
+                    book_title = book_title[:title_space-1] + "…"
+                else:
+                    book_title = book_title.ljust(title_space)
+                
+                chapter_title = bookmark.get('chapter_title', 'Chapter ?')
+                if len(chapter_title) > chapter_space:
+                    chapter_title = chapter_title[:chapter_space-1] + "…"
+                else:
+                    chapter_title = chapter_title.ljust(chapter_space)
+                
+                display_line = f"{num_field} {book_title} {chapter_title} {position_str:>4s}"
+        
+        bookmark_items.append((display_line, bookmark))  # Store display and actual bookmark
+    
+    # Use unified list dialog with custom delete handling
+    width = modal_width  # Use the same width calculated above
+    height = min(rows - 4, 25)
+    current = 0
+    
+    while True:
+        if Modal.is_active():
+            return None
+        
+        Modal.set_active("bookmarks")
+        
+        dialog = Modal.create_dialog(stdscr, width, height, f"Bookmarks ({len(GLOBAL_BOOKMARKS)} saved)")
+        
+        # Display bookmarks
+        display_height = height - 4
+        start_idx = max(0, current - display_height // 2)
+        end_idx = min(len(bookmark_items), start_idx + display_height)
+        
+        for i in range(start_idx, end_idx):
+            y = 2 + (i - start_idx)
+            attr = curses.A_REVERSE if i == current else 0
+            item_text = bookmark_items[i][0]  # Already truncated to fit
+            dialog.addstr(y, 2, item_text, attr)
+        
+        help_text = "Enter: Open | d: Delete | q: Cancel"
+        # Use colored help text formatting
+        max_help_width = width - 4  # Account for padding
+        format_help_text_with_colors(dialog, height-2, 2, help_text, max_help_width)
+        dialog.refresh()
+        
+        key = Modal.get_immediate_key(dialog)
+            
+        if key == ord('q'):  # q to exit
+            Modal.destroy_dialog(stdscr, dialog)
+            return None
+        elif key in (10, 13):  # Enter - select bookmark
+            if current < len(bookmark_items):
+                selected = bookmark_items[current][1]  # Get actual bookmark object
+                Modal.destroy_dialog(stdscr, dialog)
+                return selected
+            Modal.destroy_dialog(stdscr, dialog)
+            return None
+        elif key == ord('d'):  # Delete bookmark
+            if current < len(GLOBAL_BOOKMARKS):
+                del GLOBAL_BOOKMARKS[current]
+                save_bookmarks()
+                # Rebuild bookmark items list with same formatting logic
+                bookmark_items = []
+                for i, bookmark in enumerate(GLOBAL_BOOKMARKS):
+                    # Format timestamp
+                    timestamp = ""
+                    if 'created' in bookmark:
+                        try:
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(bookmark['created'])
+                            timestamp = dt.strftime("%m/%d %H:%M")
+                        except:
+                            timestamp = ""
+                    
+                    # Get position percentage
+                    position_pct = bookmark.get('percentage', 0.0)
+                    position_str = f"{position_pct:.0f}%"
+                    
+                    # Calculate space for fixed elements and proper spacing
+                    num_field = f"{i+1:2d}."
+                    
+                    # Check if container is narrow (less than 50 chars available)
+                    if available_width < 50 and timestamp:
+                        # Narrow container: show only timestamp and position
+                        display_line = f"{num_field} {timestamp} {position_str:>4s}"
+                    else:
+                        # Normal width: show all fields with proper spacing
+                        # Reserve space for position (right-aligned)
+                        position_space = 5  # "100%" is max 4 chars + 1 space
+                        
+                        # Reserve space for timestamp (left side after number)
+                        timestamp_space = 11 if timestamp else 0  # "12/31 23:59" + 1 space
+                        
+                        # Calculate remaining space for title and chapter with proper spacing
+                        # Leave extra space for safety to prevent overrun
+                        reserved_space = len(num_field) + 1 + timestamp_space + position_space + 2  # +2 for safety margin
+                        content_width = max(20, available_width - reserved_space)  # Ensure minimum content width
+                        
+                        # Split content space: 40% title, 60% chapter, with reasonable minimums
+                        title_space = max(8, min(20, int(content_width * 0.4)))  # Cap title at 20 chars
+                        chapter_space = max(8, content_width - title_space)
+                        
+                        # Truncate title and chapter to fit
+                        book_title = bookmark.get('book_title', 'Unknown')
+                        if len(book_title) > title_space:
+                            book_title = book_title[:title_space-1] + "…"
+                        else:
+                            book_title = book_title.ljust(title_space)
+                        
+                        chapter_title = bookmark.get('chapter_title', 'Chapter ?')
+                        if len(chapter_title) > chapter_space:
+                            chapter_title = chapter_title[:chapter_space-1] + "…"
+                        else:
+                            chapter_title = chapter_title.ljust(chapter_space)
+                        
+                        # Create spaced display line with proper alignment
+                        if timestamp:
+                            display_line = f"{num_field} {timestamp} {book_title} {chapter_title} {position_str:>4s}"
+                        else:
+                            # No timestamp, give more space to content
+                            available_for_content = content_width + timestamp_space
+                            title_space = max(10, min(25, int(available_for_content * 0.4)))  # Cap title at 25 chars
+                            chapter_space = max(8, available_for_content - title_space)
+                            
+                            book_title = bookmark.get('book_title', 'Unknown')
+                            if len(book_title) > title_space:
+                                book_title = book_title[:title_space-1] + "…"
+                            else:
+                                book_title = book_title.ljust(title_space)
+                            
+                            chapter_title = bookmark.get('chapter_title', 'Chapter ?')
+                            if len(chapter_title) > chapter_space:
+                                chapter_title = chapter_title[:chapter_space-1] + "…"
+                            else:
+                                chapter_title = chapter_title.ljust(chapter_space)
+                            
+                            display_line = f"{num_field} {book_title} {chapter_title} {position_str:>4s}"
+                    
+                    bookmark_items.append((display_line, bookmark))
+                
+                if current >= len(bookmark_items) and current > 0:
+                    current = len(bookmark_items) - 1
+                if not bookmark_items:
+                    Modal.destroy_dialog(stdscr, dialog)
+                    return None
+            Modal.destroy_dialog(stdscr, dialog)
+            continue  # Restart dialog with updated list
+        elif key == curses.KEY_UP and current > 0:
+            current -= 1
+        elif key == curses.KEY_DOWN and current < len(bookmark_items) - 1:
+            current += 1
+        elif key == curses.KEY_RESIZE:
+            Modal.destroy_dialog(stdscr, dialog)
+            return curses.KEY_RESIZE
+        
+        Modal.destroy_dialog(stdscr, dialog)
 
-        for n in range(totlines):
-            att = curses.A_REVERSE if index == n else curses.A_NORMAL
-            pre = ">>" if index == n else "  "
-            pad.addstr(n, 0, pre)
-            pad.chgat(n, 0, span[n], pad.getbkgd() | att)
-
-        pad.refresh(y, 0, Y+4,X+4, rows - 5, cols - 6)
-        key_toc = toc.getch()
-
-    toc.clear()
-    toc.refresh()
-    return
+def toc(stdscr, src, index):
+    """Table of Contents using unified modal system"""
+    if Modal.is_active():
+        return None
+    
+    # Create simple list from src for modal display
+    toc_items = []
+    for i, item in enumerate(src):
+        prefix = ">> " if i == index else "   "
+        toc_items.append(f"{prefix}{item}")
+    
+    # Use modal list dialog
+    rows, cols = stdscr.getmaxyx()
+    width = min(cols - 4, 80)
+    height = min(rows - 4, 25)
+    
+    result = Modal.list_dialog(stdscr, width, height, "Table of Contents", toc_items, index)
+    
+    if result is None:
+        return None
+    elif result == curses.KEY_RESIZE:
+        return curses.KEY_RESIZE
+    else:
+        # Find the index of the selected item
+        for i, item in enumerate(toc_items):
+            if item == result:
+                return i
+        return None
 
 
 def meta(stdscr, ebook):
+    """Metadata display using unified modal system"""
+    if Modal.is_active():
+        return None
+    
+    # Prepare metadata lines
     rows, cols = stdscr.getmaxyx()
-    hi, wi = rows - 4, cols - 4
-    Y, X = 2, 2
-    meta = curses.newwin(hi, wi, Y, X)
-    if COLORSUPPORT:
-        meta.bkgd(stdscr.getbkgd())
-
-    meta.box()
-    meta.keypad(True)
-    meta.addstr(1,2, "Metadata")
-    meta.addstr(2,2, "--------")
-    key_meta = 0
-
+    wrap_width = max(10, min(cols - 10, 70))  # Account for dialog borders and padding
+    
     mdata = []
     for i in ebook.get_meta():
         data = re.sub("<[^>]*>", "", i[1])
         data = re.sub("\t", "", data)
-        mdata += textwrap.wrap(i[0].upper() + ": " + data, wi - 6)
-    src_lines = mdata
-    totlines = len(src_lines)
+        mdata += textwrap.wrap(i[0].upper() + ": " + data, wrap_width)
+    
+    if not mdata:
+        mdata = ["No metadata available"]
+    
+    # Use modal list dialog (read-only)
+    width = min(cols - 4, 80)
+    height = min(rows - 4, 25)
+    
+    result = Modal.list_dialog(stdscr, width, height, "Metadata", mdata, 0, "q: Close")
+    return result
 
-    pad = curses.newpad(totlines, wi - 2 )
-    if COLORSUPPORT:
-        pad.bkgd(stdscr.getbkgd())
 
-    pad.keypad(True)
-    for n, i in enumerate(src_lines):
-        pad.addstr(n, 0, i)
-    y = 0
-    meta.refresh()
-    pad.refresh(y,0, Y+4,X+4, rows - 5, cols - 6)
-
-    padhi = rows - 5 - Y - 4 + 1
-
-    while key_meta not in META|QUIT:
-        if key_meta in SCROLL_UP|SCROLL_UP_K and y > 0:
-            y -= 1
-        elif key_meta in SCROLL_DOWN|SCROLL_DOWN_J and y < totlines - hi + 6:
-            y += 1
-        elif key_meta in PAGE_UP:
-            y = pgup(y, padhi)
-        elif key_meta in PAGE_DOWN:
-            y = pgdn(y, totlines, padhi)
-        elif key_meta in CH_HOME:
-            y = 0
-        elif key_meta in CH_END:
-            y = pgend(totlines, padhi)
-        elif key_meta in {curses.KEY_RESIZE}|HELP|TOC:
-            return key_meta
-        pad.refresh(y,0, 6,5, rows - 5, cols - 5)
-        key_meta = meta.getch()
-
-    meta.clear()
-    meta.refresh()
-    return
-
+def format_help_text_with_colors(dialog, y, x, text, width=None):
+    """Display help text with highlighted key names"""
+    import re
+    
+    # Pattern to match key names - more flexible matching
+    key_pattern = r'(Enter|Space|Tab|Home|End|PgUp|PgDn|[↓↑←→]|[a-zA-Z?/])(?=\s*[-:])'
+    
+    if width and len(text) > width:
+        text = text[:width-1] + "…"
+    
+    col = x
+    last_end = 0
+    
+    for match in re.finditer(key_pattern, text):
+        start, end = match.span()
+        
+        # Add normal text before the key
+        if start > last_end:
+            normal_text = text[last_end:start]
+            try:
+                dialog.addstr(y, col, normal_text)
+                col += len(normal_text)
+            except curses.error:
+                break
+        
+        # Add highlighted key name
+        key_text = text[start:end]
+        try:
+            # Use bright white highlighting for key names
+            key_color_pair = get_color_pair((255, 255, 255))
+            dialog.addstr(y, col, key_text, curses.color_pair(key_color_pair) | curses.A_BOLD)
+            col += len(key_text)
+        except curses.error:
+            break
+        
+        last_end = end
+    
+    # Add remaining normal text
+    if last_end < len(text):
+        remaining_text = text[last_end:]
+        try:
+            dialog.addstr(y, col, remaining_text)
+        except curses.error:
+            pass
 
 def help(stdscr):
-    rows, cols = stdscr.getmaxyx()
-    hi, wi = rows - 4, cols - 4
-    Y, X = 2, 2
-    help = curses.newwin(hi, wi, Y, X)
-    if COLORSUPPORT:
-        help.bkgd(stdscr.getbkgd())
-
-    help.box()
-    help.keypad(True)
-    help.addstr(1,2, "Help")
-    help.addstr(2,2, "----")
-    key_help = 0
-
-    src = re.search("Key Bind(\n|.)*", __doc__).group()
-    src_lines = src.splitlines()
-    totlines = len(src_lines)
-
-    pad = curses.newpad(totlines, wi - 2 )
-    if COLORSUPPORT:
-        pad.bkgd(stdscr.getbkgd())
-
-    pad.keypad(True)
-    for n, i in enumerate(src_lines):
-        pad.addstr(n, 0, i)
-    y = 0
-    help.refresh()
-    pad.refresh(y,0, Y+4,X+4, rows - 5, cols - 6)
-
-    padhi = rows - 5 - Y - 4 + 1
-
-    while key_help not in HELP|QUIT:
-        if key_help in SCROLL_UP|SCROLL_UP_K and y > 0:
-            y -= 1
-        elif key_help in SCROLL_DOWN|SCROLL_DOWN_J and y < totlines - hi + 6:
-            y += 1
-        elif key_help in PAGE_UP:
-            y = pgup(y, padhi)
-        elif key_help in PAGE_DOWN:
-            y = pgdn(y, totlines, padhi)
-        elif key_help in CH_HOME:
-            y = 0
-        elif key_help in CH_END:
-            y = pgend(totlines, padhi)
-        elif key_help in {curses.KEY_RESIZE}|META|TOC:
-            return key_help
-        pad.refresh(y,0, 6,5, rows - 5, cols - 5)
-        key_help = help.getch()
-
-    help.clear()
-    help.refresh()
-    return
+    """Simplified help dialog using unified modal system"""
+    if Modal.is_active():
+        return None
+    
+    # Create basic help content
+    help_lines = [
+        "Key Bindings:",
+        "",
+        "q          - Quit",
+        "?          - Show this help",
+        "↓/↑        - Scroll down/up",
+        "Space/→    - Next page", 
+        "←          - Previous page",
+        "n          - Next chapter",
+        "p          - Previous chapter",
+        "Home       - Beginning of chapter",
+        "End        - End of chapter",
+        "i          - Open visible image",
+        "u          - Show URLs",
+        "/          - Search",
+        "Tab/t      - Table of contents",
+        "m          - Show metadata",
+        "s          - Save bookmark",
+        "b          - Show bookmarks",
+        "c          - Cycle color schemes"
+    ]
+    
+    return Modal.list_dialog(stdscr, 50, 20, "Help", help_lines)
 
 
 def dots_path(curr, tofi):
@@ -1785,7 +3153,7 @@ def searching(stdscr, pad, src, width, y, ch, tot):
             if type(ipt) == str:
                 ipt = ord(ipt)
 
-            if ipt == 27:
+            if ipt == ord('q'):  # 'q' to exit
                 stat.clear()
                 stat.refresh()
                 curses.echo(0)
@@ -1857,7 +3225,7 @@ def searching(stdscr, pad, src, width, y, ch, tot):
                 elif s == ord("n") and ch == 0:
                     SEARCHPATTERN = "/"+SEARCHPATTERN[1:]
                     return None, 1
-                elif s == ord("N") and ch +1 == tot:
+                elif s == ord("p") and ch +1 == tot:
                     SEARCHPATTERN = "?"+SEARCHPATTERN[1:]
                     return None, -1
 
@@ -1904,7 +3272,7 @@ def searching(stdscr, pad, src, width, y, ch, tot):
                     sidx + 1,
                     len(found),
                     ch+1, tot)
-        elif s == ord("N"):
+        elif s == ord("p"):
             SEARCHPATTERN = "?"+SEARCHPATTERN[1:]
             if sidx == 0:
                 if ch > 0:
@@ -2249,10 +3617,13 @@ def render_image_with_quarter_blocks(img, max_width, max_height):
 def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
     """Convert image placeholders to block-based representation inline with color info."""
     if not PIL_AVAILABLE or not imgs:
-        return src_lines, []
+        # Create empty image tracking array for each line
+        image_line_map = [None] * len(src_lines)
+        return src_lines, [], image_line_map
     
     new_lines = []
     image_info = []
+    image_line_map = []  # Track which image (if any) is associated with each line
     
     for line in src_lines:
         # Check if line contains an image placeholder
@@ -2276,6 +3647,74 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     # Get original image dimensions to make intelligent scaling decisions
                     orig_width, orig_height = img.size
                     orig_aspect = orig_width / orig_height
+                    
+                    # Debug: show image dimensions in debug mode
+                    if os.getenv('TERMBOOK_DEBUG'):
+                        print(f"DEBUG: Image {impath} is {orig_width}x{orig_height} pixels", file=sys.stderr)
+                    
+                    # Enhanced decorative image filtering
+                    is_decorative = False
+                    
+                    # Size-based filtering: expand threshold to catch more decorative images
+                    if orig_width <= 120 and orig_height <= 120:
+                        is_decorative = True
+                    
+                    # Also filter out very small images that are clearly decorative
+                    if orig_width <= 50 or orig_height <= 50:
+                        is_decorative = True
+                    
+                    # Area-based filtering: images with very small total area are decorative
+                    total_area = orig_width * orig_height
+                    if total_area <= 4000:  # Less than ~63x63 pixels
+                        is_decorative = True
+                    
+                    # Check filename patterns that suggest decorative images
+                    img_path_lower = impath.lower()
+                    decorative_patterns = ['bullet', 'ornament', 'decoration', 'divider', 
+                                         'separator', 'icon', 'mark', 'symbol', 'star', 'dot',
+                                         'border', 'line', 'rule', 'flourish', 'accent', 'deco',
+                                         'spacer', 'gap', 'filler']
+                    if any(pattern in img_path_lower for pattern in decorative_patterns):
+                        is_decorative = True
+                    
+                    # Aspect ratio filtering: very wide or very tall images are often decorative
+                    if orig_aspect > 10 or orig_aspect < 0.1:  # 10:1 or 1:10 ratio
+                        is_decorative = True
+                    
+                    # Check for simple/repetitive content - images with very few colors
+                    try:
+                        # Sample the image to check color variety
+                        sample_img = img.resize((16, 16))  # Small sample for quick processing
+                        colors = sample_img.getcolors(maxcolors=256)
+                        if colors and len(colors) <= 6:  # Very few colors = likely decorative
+                            is_decorative = True
+                        
+                        # For very small images, be even more aggressive
+                        if total_area <= 2000 and colors and len(colors) <= 10:
+                            is_decorative = True
+                    except:
+                        pass
+                    
+                    # Check for very thin images that span most of a line (borders, rules)
+                    if (orig_width > 200 and orig_height < 30) or (orig_height > 200 and orig_width < 30):
+                        is_decorative = True
+                    
+                    if is_decorative:
+                        # Replace with minimal characters based on size and type
+                        if orig_width <= 16 and orig_height <= 16:
+                            # Very tiny - just use a dot
+                            decorative_char = "·"  # Middle dot for very small images
+                        elif orig_width <= 40 and orig_height <= 40:
+                            # Small - use a simple bullet
+                            decorative_char = "•"
+                        elif orig_aspect > 5 or orig_aspect < 0.2:
+                            # Thin/wide decorative - use a line
+                            decorative_char = "―" if orig_aspect > 5 else "|"
+                        else:
+                            # Larger decorative - just skip it entirely
+                            decorative_char = ""  # Remove completely for larger decorative images
+                        new_lines.append(line.replace(f"[IMG:{img_idx}]", decorative_char))
+                        continue
                     
                     # Calculate available screen space
                     max_chars_available = max_width - 8
@@ -2320,9 +3759,17 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                             char_height = max_height_available
                             char_width = int(char_height * orig_aspect * terminal_char_aspect)
                     
-                    # Final bounds checking
-                    char_width = max(12, min(char_width, max_width_by_screen))  # Minimum 12 chars wide
-                    char_height = max(6, min(char_height, max_height_available))  # Minimum 6 chars tall
+                    # Final bounds checking - adjust minimums based on original image size
+                    if orig_width >= 100 and orig_height >= 100:
+                        # Reasonably sized original, enforce decent minimums
+                        char_width = max(12, min(char_width, max_width_by_screen))  # Minimum 12 chars wide
+                        char_height = max(6, min(char_height, max_height_available))  # Minimum 6 chars tall
+                    else:
+                        # Small original image, use smaller minimums to preserve aspect ratio
+                        min_width = max(6, orig_width // 4)  # Scale based on original
+                        min_height = max(4, orig_height // 4)
+                        char_width = max(min_width, min(char_width, max_width_by_screen))
+                        char_height = max(min_height, min(char_height, max_height_available))
                     
                     # Determine scale factor for rendering quality
                     scale_factor = 2 if char_width >= 40 else 1
@@ -2402,8 +3849,10 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                         # Add each line once (no repetition - half-block technique handles vertical resolution)
                         new_lines.append("IMG_LINE:" + centered_line)
                         image_info.append(padded_colors)
+                        image_line_map.append(img_idx)  # Track which image this line belongs to
                     
                     new_lines.append("")  # Empty line after image
+                    image_line_map.append(None)  # Empty line doesn't belong to any image
                     image_info.append([])  # Empty color info for empty line
                     
                 except Exception as e:
@@ -2411,15 +3860,18 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     error_msg = f"[Error loading image: {imgs[img_idx]}]"
                     new_lines.append(" " * ((max_width - len(error_msg)) // 2) + error_msg)
                     image_info.append([])
+                    image_line_map.append(img_idx)  # Error line still belongs to this image
             else:
                 # Image index out of range
                 new_lines.append(line)
                 image_info.append([])
+                image_line_map.append(None)  # No valid image association
         else:
             new_lines.append(line)
             image_info.append([])
+            image_line_map.append(None)  # Regular text line, no image association
     
-    return new_lines, image_info
+    return new_lines, image_info, image_line_map
 
 
 def show_loading_animation(stdscr, message="Loading..."):
@@ -2435,9 +3887,11 @@ def show_loading_animation(stdscr, message="Loading..."):
     msg_len = len(message)
     start_col = center_col - msg_len // 2
     
-    # Clear just the message line area
+    # Clear only the exact message area, no extra padding to avoid overwriting text
     try:
-        stdscr.addstr(center_row, 0, " " * cols)
+        # Only clear the space where the loading message will appear - exact length only
+        if start_col >= 0 and start_col + msg_len <= cols:
+            stdscr.addstr(center_row, start_col, " " * msg_len)
     except:
         pass
     
@@ -2494,12 +3948,25 @@ def update_loading_animation(stdscr, message, start_col, center_row, spectrum_co
         pass  # Ignore any display errors
 
 def reader(stdscr, ebook, index, width, y, pctg):
+    global CURRENT_SEARCH_TERM, WHOLE_BOOK_SEARCH_START, WHOLE_BOOK_SEARCH_VISITED
     k = 0 if SEARCHPATTERN is None else ord("/")
     rows, cols = stdscr.getmaxyx()
     x = (cols - width) // 2
 
     contents = ebook.contents
     toc_src = ebook.toc_entries
+    
+    # Validate index is within bounds to prevent IndexError
+    if not contents or len(contents) == 0 or index < 0 or index >= len(contents):
+        index = 0
+        y = 0
+        pctg = 0
+    
+    # Additional safety check before accessing contents
+    if not contents or len(contents) == 0:
+        # Handle case where the book has no chapters/contents
+        raise Exception(f"Book has no readable content: {ebook.path}")
+    
     chpath = contents[index]
     content = ebook.file.open(chpath).read()
     content = content.decode("utf-8")
@@ -2511,12 +3978,75 @@ def reader(stdscr, ebook, index, width, y, pctg):
     except:
         pass
 
-    src_lines, imgs = parser.get_lines(width)
+    src_lines, imgs, img_alts = parser.get_lines(width)
+    
+    # Check if we're continuing a whole-book search
+    if WHOLE_BOOK_SEARCH_START is not None and CURRENT_SEARCH_TERM:
+        # Add current chapter to visited list
+        if index not in WHOLE_BOOK_SEARCH_VISITED:
+            WHOLE_BOOK_SEARCH_VISITED.append(index)
+        
+        # Search for term in this chapter
+        found_in_chapter = False
+        for i, line in enumerate(src_lines):
+            if CURRENT_SEARCH_TERM.lower() in line.lower():
+                # Found it! Reset search tracking and highlight
+                WHOLE_BOOK_SEARCH_START = None
+                WHOLE_BOOK_SEARCH_VISITED = []
+                y = i
+                found_in_chapter = True
+                break
+        
+        if not found_in_chapter:
+            # Not found in this chapter, check if we've searched all chapters
+            if len(WHOLE_BOOK_SEARCH_VISITED) >= len(contents) or index == WHOLE_BOOK_SEARCH_START:
+                # We've searched everything and returned to start, or visited all chapters
+                rows, cols = stdscr.getmaxyx()
+                stdscr.addstr(rows-1, 0, f" '{CURRENT_SEARCH_TERM}' not found in book ", curses.A_REVERSE)
+                stdscr.refresh()
+                curses.napms(2000)  # Show for 2 seconds
+                WHOLE_BOOK_SEARCH_START = None
+                WHOLE_BOOK_SEARCH_VISITED = []
+                CURRENT_SEARCH_TERM = None
+            else:
+                # Continue to next chapter
+                next_chapter = (index + 1) % len(contents)
+                chapter_offset = next_chapter - index
+                
+                # Show searching message with cancel option
+                rows, cols = stdscr.getmaxyx()
+                stdscr.addstr(rows-1, 0, f" Searching chapter {next_chapter + 1}... (press 'q' to cancel) ", curses.A_REVERSE)
+                stdscr.refresh()
+                
+                # Check for cancel key press
+                stdscr.nodelay(True)  # Non-blocking input
+                try:
+                    cancel_key = stdscr.getch()
+                    if cancel_key == ord('q'):
+                        # User wants to cancel whole-book search
+                        WHOLE_BOOK_SEARCH_START = None
+                        WHOLE_BOOK_SEARCH_VISITED = []
+                        CURRENT_SEARCH_TERM = None
+                        stdscr.addstr(rows-1, 0, " Search cancelled ", curses.A_REVERSE)
+                        stdscr.refresh()
+                        curses.napms(1000)  # Show briefly
+                        return 0, width, y, y/totlines if totlines > 0 else 0
+                except:
+                    pass  # No key pressed
+                finally:
+                    stdscr.nodelay(False)  # Restore blocking input
+                curses.napms(300)  # Brief pause
+                
+                return (chapter_offset, width, 0, None)
     
     # Process images inline if PIL is available
     image_info = []
+    image_line_map = []
     if PIL_AVAILABLE:
-        src_lines, image_info = render_images_inline(ebook, chpath, src_lines, imgs, width)
+        src_lines, image_info, image_line_map = render_images_inline(ebook, chpath, src_lines, imgs, width)
+    else:
+        # Create empty image tracking array if not rendering images
+        image_line_map = [None] * len(src_lines)
     
     totlines = len(src_lines)
 
@@ -2536,6 +4066,12 @@ def reader(stdscr, ebook, index, width, y, pctg):
     
     # Render text with color support for images
     for n, line in enumerate(src_lines):
+        # DEBUG: Log what type of line we're processing
+        try:
+            with open('/tmp/search_debug.log', 'a') as f:
+                f.write(f"RENDER_LINE: n={n}, line_type='{line[:20]}...'\n")
+        except:
+            pass
         try:
             # Check if this is an image line with color information
             if line.startswith("IMG_LINE:") and n < len(image_info) and image_info[n]:
@@ -2559,10 +4095,15 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 # Syntax highlighted line with color information
                 content = line[10:]  # Remove "SYNTAX_HL:" prefix
                 
-                # First, fill the entire line with dark background
+                # First, fill the entire line with dark background  
                 if COLORSUPPORT:
-                    # Create dark background color pair (white text on dark gray background)
+                    # Use the same color system as syntax highlighting for consistency
+                    # Try both color pair systems to ensure background gets applied
                     dark_bg_pair = get_color_pair((200, 200, 200), (32, 32, 32))  # Light gray text on dark gray background
+                    if dark_bg_pair <= 0:
+                        # Fallback: try the syntax color system
+                        dark_bg_pair = get_syntax_color_pair((200, 200, 200))
+                    
                     if dark_bg_pair > 0:
                         # Fill from text start to right edge of terminal with dark background
                         for bg_col in range(cols - x):
@@ -2572,7 +4113,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                 pass  # Ignore if we can't write at this position
                 
                 if "|" in content:
-                    text_part, color_part = content.split("|", 1)
+                    text_part, color_part = content.rsplit("|", 1)
                     try:
                         # Parse the color list
                         import ast
@@ -2582,8 +4123,11 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         line_lower = text_part.lower()
                         is_keyword_line = any(keyword in line_lower for keyword in ['import', 'export', 'from', 'const', 'let', 'var', 'function'])
                         
-                        # Apply syntax highlighting with colors
+                        # Apply syntax highlighting with colors - CRITICAL: Stay within screen bounds
                         for char_idx, char in enumerate(text_part):
+                            if char_idx >= cols - x:  # STOP if we would go beyond screen width
+                                break
+                                
                             if char_idx < len(colors) and colors[char_idx]:
                                 # Get color tuple (r, g, b)
                                 color_tuple = colors[char_idx]
@@ -2591,19 +4135,105 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                     # Get or create color pair for this syntax color
                                     color_pair = get_syntax_color_pair(color_tuple)
                                     if color_pair > 0:
-                                        pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
+                                        try:
+                                            pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
+                                        except:
+                                            break  # Stop if we can't write anymore
                                     else:
                                         # Fallback to bold if color pair couldn't be created
-                                        pad.addstr(n, char_idx, char, curses.A_BOLD)
+                                        try:
+                                            pad.addstr(n, char_idx, char, curses.A_BOLD)
+                                        except:
+                                            break  # Stop if we can't write anymore
                                 else:
                                     # Invalid color format, use regular text
-                                    pad.addstr(n, char_idx, char)
+                                    try:
+                                        pad.addstr(n, char_idx, char)
+                                    except:
+                                        break  # Stop if we can't write anymore
                             else:
                                 # Regular text
-                                pad.addstr(n, char_idx, char)
+                                try:
+                                    pad.addstr(n, char_idx, char)
+                                except:
+                                    break  # Stop if we can't write anymore
+                        
+                        # Highlight search results with inverse video bright
+                        if CURRENT_SEARCH_TERM:
+                            import re
+                            search_pattern = re.escape(CURRENT_SEARCH_TERM)  # Escape special regex chars
+                            # DEBUG: Write to a temp file to see if this code is reached
+                            try:
+                                with open('/tmp/search_debug.log', 'a') as f:
+                                    f.write(f"SEARCH DEBUG: Looking for '{CURRENT_SEARCH_TERM}' in '{text_part[:50]}...'\n")
+                            except:
+                                pass
+                            for match in re.finditer(search_pattern, text_part, re.IGNORECASE):
+                                # DEBUG: Found a match
+                                try:
+                                    with open('/tmp/search_debug.log', 'a') as f:
+                                        f.write(f"SEARCH DEBUG: Found match '{match.group()}' at {match.start()}-{match.end()}\n")
+                                except:
+                                    pass
+                                start_pos = match.start()
+                                end_pos = match.end()
+                                match_text = match.group()
+                                
+                                # Apply custom search highlighting based on color scheme
+                                for char_idx, char in enumerate(match_text):
+                                    abs_char_pos = start_pos + char_idx
+                                    if abs_char_pos < len(text_part) and n + n_relative < rows and abs_char_pos < width:
+                                        try:
+                                            if COLORSUPPORT:
+                                                # Simple but effective approach: create custom search highlight color on demand
+                                                try:
+                                                    # Determine current color scheme
+                                                    current_bg_pair = curses.pair_number(pad.getbkgd())
+                                                    is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
+                                                    
+                                                    # Try to create a search highlight color pair
+                                                    search_color_pair = 250  # Use high pair number to avoid conflicts
+                                                    
+                                                    if is_light_scheme:
+                                                        # Light mode: bright white text on black background
+                                                        curses.init_pair(search_color_pair, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                                                    else:
+                                                        # Dark modes: black text on bright green background (closest to fluorescent yellow-green)
+                                                        curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_GREEN)
+                                                    
+                                                    pad.addstr(n, abs_char_pos, char, curses.color_pair(search_color_pair) | curses.A_BOLD)
+                                                except:
+                                                    # If color pair creation fails, fall back to reverse video
+                                                    pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
+                                            else:
+                                                # Fallback to just inverse and bold
+                                                pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
+                                        except:
+                                            break  # Stop if we can't write anymore
+                        
+                        # Now look for annotation patterns (#1, #2, #3, etc.) and highlight them
+                        import re
+                        annotation_pattern = r'#(\d+)'
+                        for match in re.finditer(annotation_pattern, text_part):
+                            start_pos = match.start()
+                            end_pos = match.end()
+                            annotation_text = match.group()
+                            
+                            # Apply yellow text on normal dark background to the annotation
+                            if COLORSUPPORT:
+                                annotation_color_pair = get_syntax_color_pair((255, 255, 0))  # Yellow text
+                                if annotation_color_pair > 0:
+                                    # Overwrite the annotation with yellow color - but ONLY if it's within bounds
+                                    for i, char in enumerate(annotation_text):
+                                        char_pos = start_pos + i
+                                        if char_pos < cols - x:  # CRITICAL: Only render if within screen bounds
+                                            try:
+                                                pad.addstr(n, char_pos, char, curses.color_pair(annotation_color_pair))
+                                            except:
+                                                pass  # Ignore if we can't write at this position
                     except Exception as e:
                         # If color parsing fails, just display as regular text
-                        pad.addstr(n, 0, text_part)
+                        apply_search_highlighting(pad, n, 0, text_part)
                 else:
                     # No color info, but still a syntax highlighted line - add background
                     if COLORSUPPORT:
@@ -2611,15 +4241,25 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         pass
                     # Display the text (which might be empty for blank lines)
                     if content.strip():
-                        pad.addstr(n, 0, content)
+                        apply_search_highlighting(pad, n, 0, content)
             elif line.startswith("URL_HL:"):
                 # URL highlighted line
                 import re
                 content = line[7:]  # Remove "URL_HL:" prefix
-                url_pattern = r'https?://[^\s\)\]\}]+'
                 
-                # Find all URLs in the line
-                urls = list(re.finditer(url_pattern, content))
+                # Find all URLs in the line using central function
+                url_data = find_urls_in_text(content)
+                urls = []
+                for url, start, end in url_data:
+                    class MockMatch:
+                        def __init__(self, text, start, end):
+                            self._text = text
+                            self._start = start
+                            self._end = end
+                        def group(self): return self._text
+                        def start(self): return self._start
+                        def end(self): return self._end
+                    urls.append(MockMatch(url, start, end))
                 if urls:
                     current_pos = 0
                     for url_match in urls:
@@ -2628,14 +4268,16 @@ def reader(stdscr, ebook, index, width, y, pctg):
                             before_text = content[current_pos:url_match.start()]
                             pad.addstr(n, current_pos, before_text)
                         
-                        # Add URL with bright cyan color (0, 255, 255)
+                        # Add URL with scheme-appropriate color (no underline for better readability)
                         url_text = url_match.group()
-                        url_color_pair = get_syntax_color_pair((0, 255, 255))  # Bright cyan
-                        if url_color_pair > 0:
-                            pad.addstr(n, url_match.start(), url_text, curses.color_pair(url_color_pair) | curses.A_BOLD)
-                        else:
-                            # Fallback to bold + underline if color not available
-                            pad.addstr(n, url_match.start(), url_text, curses.A_BOLD | curses.A_UNDERLINE)
+                        
+                        # Detect color scheme using pad background
+                        current_bg_pair = curses.pair_number(pad.getbkgd())
+                        is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
+                        
+                        # Just use attributes without custom colors to avoid black background
+                        # Use underline for all URLs regardless of theme
+                        pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
                         
                         current_pos = url_match.end()
                     
@@ -2645,7 +4287,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         pad.addstr(n, current_pos, remaining_text)
                 else:
                     # No URLs found, display as regular text
-                    pad.addstr(n, 0, content)
+                    apply_search_highlighting(pad, n, 0, content)
             elif line.startswith("TABLE_BG:"):
                 # Table background line - similar to syntax highlighting background
                 content = line[9:]  # Remove "TABLE_BG:" prefix
@@ -2664,36 +4306,58 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 
                 # Add the actual text content
                 if content.strip():
-                    # Check for URLs within table content and highlight them
-                    import re
-                    url_pattern = r'https?://[^\s\)\]\}]+'
-                    urls = list(re.finditer(url_pattern, content))
+                    # Check if content is already a URL_HL line
+                    if content.startswith("URL_HL:"):
+                        # Handle nested URL_HL within table background
+                        url_content = content[7:]  # Remove "URL_HL:" prefix
+                        # Find URLs in the content using central function
+                        url_data = find_urls_in_text(url_content)
+                    else:
+                        # Check for URLs within regular table content and highlight them
+                        import re
+                        url_data = find_urls_in_text(content)
+                    urls = []
+                    for url, start, end in url_data:
+                        class MockMatch:
+                            def __init__(self, text, start, end):
+                                self._text = text
+                                self._start = start
+                                self._end = end
+                            def group(self): return self._text
+                            def start(self): return self._start
+                            def end(self): return self._end
+                        urls.append(MockMatch(url, start, end))
                     if urls:
                         # Handle URLs within table background
                         current_pos = 0
+                        # Use the appropriate content for text positioning
+                        text_content = url_content if content.startswith("URL_HL:") else content
                         for url_match in urls:
                             # Add text before URL
                             if url_match.start() > current_pos:
-                                before_text = content[current_pos:url_match.start()]
+                                before_text = text_content[current_pos:url_match.start()]
                                 pad.addstr(n, current_pos, before_text)
                             
-                            # Add URL with cyan color on table background
+                            # Add URL with same highlighting as regular URLs (just underline, no background)
                             url_text = url_match.group()
-                            url_color_pair = get_color_pair((0, 255, 255), (48, 48, 48))  # Cyan on table background
-                            if url_color_pair > 0:
-                                pad.addstr(n, url_match.start(), url_text, curses.color_pair(url_color_pair) | curses.A_BOLD)
-                            else:
-                                pad.addstr(n, url_match.start(), url_text, curses.A_BOLD | curses.A_UNDERLINE)
+                            # Reset to normal colors and just add underline (no table background for URLs)
+                            try:
+                                # Clear the table background for this URL by using normal color pair
+                                pad.addstr(n, url_match.start(), url_text, curses.color_pair(0) | curses.A_UNDERLINE)
+                            except:
+                                # Fallback to just underline if color reset fails
+                                pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
                             
                             current_pos = url_match.end()
                         
                         # Add remaining text
-                        if current_pos < len(content):
-                            remaining_text = content[current_pos:]
+                        if current_pos < len(text_content):
+                            remaining_text = text_content[current_pos:]
                             pad.addstr(n, current_pos, remaining_text)
                     else:
-                        # No URLs, just add the text
-                        pad.addstr(n, 0, content)
+                        # No URLs, just add the text (use appropriate content)
+                        display_content = url_content if content.startswith("URL_HL:") else content
+                        apply_search_highlighting(pad, n, 0, display_content)
             elif line.startswith("HEADER:"):
                 # Header line - add underline formatting only to the actual text
                 content = line[7:]  # Remove "HEADER:" prefix
@@ -2704,7 +4368,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     
                     # Add leading whitespace without formatting
                     if text_start > 0:
-                        pad.addstr(n, 0, content[:text_start])
+                        apply_search_highlighting(pad, n, 0, content[:text_start])
                     
                     # Add the actual header text with underline + bold
                     header_text = content[text_start:text_end]
@@ -2713,11 +4377,26 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     
                     # Add trailing whitespace without formatting (if any)
                     if text_end < len(content):
-                        pad.addstr(n, text_end, content[text_end:])
+                        apply_search_highlighting(pad, n, text_end, content[text_end:])
+            elif line.startswith("CAPTION:"):
+                # Caption line - format with italic style and centered
+                content = line[8:]  # Remove "CAPTION:" prefix
+                if content.strip():
+                    # Center the caption text
+                    centered_content = content.strip().center(cols)
+                    try:
+                        # Add italic formatting if supported, otherwise just dim
+                        if hasattr(curses, 'A_ITALIC'):
+                            pad.addstr(n, 0, centered_content, curses.A_ITALIC)
+                        else:
+                            pad.addstr(n, 0, centered_content, curses.A_DIM)
+                    except:
+                        # Fallback to normal text if formatting fails
+                        apply_search_highlighting(pad, n, 0, centered_content)
             else:
                 # Regular text line
                 display_line = line[9:] if line.startswith("IMG_LINE:") else line
-                pad.addstr(n, 0, str(display_line))
+                apply_search_highlighting(pad, n, 0, str(display_line))
         except:
             pass
     # Remove end markers - just display clean text
@@ -2730,8 +4409,12 @@ def reader(stdscr, ebook, index, width, y, pctg):
     except curses.error:
         pass
 
+    global INITIAL_HELP_SHOWN
+    
     countstring = ""
     svline = "dontsave"
+    show_initial_help = not INITIAL_HELP_SHOWN  # Only show if not previously shown
+    help_message_start_time = time.time()  # Track when help message was first shown
     while True:
         if countstring == "":
             count = 1
@@ -2741,7 +4424,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
             countstring = countstring + chr(k)
         else:
             if k in QUIT:
-                if k == 27 and countstring != "":
+                if k == ord('q') and countstring != "":
                     countstring = ""
                 else:
                     savestate(ebook.path, index, width, y, y/totlines)
@@ -2755,16 +4438,15 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     return -1, width, -rows, None
                 else:
                     y = 0
-            elif k in SCROLL_UP_K:
-                if count > 1:
-                    svline = y - 1
-                if y >= count:
-                    y -= count
             elif k in PAGE_UP:
                 if y == 0 and index != 0:
                     return -1, width, -rows, None
                 else:
-                    y = pgup(y, rows, LINEPRSRV, count)
+                    new_y = pgup(y, rows, LINEPRSRV, count)
+                    # Skip backward through empty pages if the new position is empty
+                    if is_page_empty(src_lines, new_y, rows):
+                        new_y = skip_empty_pages_backward(src_lines, new_y, rows)
+                    y = new_y
             elif k in SCROLL_DOWN:
                 if count > 1:
                     svline = y + rows - 1
@@ -2774,31 +4456,24 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     return 1, width, 0, None
                 else:
                     y = totlines - rows
-            elif k in SCROLL_DOWN_J:
-                if count > 1:
-                    svline = y + rows - 1
-                if y + count <= totlines - rows:
-                    y += count
             elif k in PAGE_DOWN:
                 if totlines - y - LINEPRSRV > rows:
                     # y = pgdn(y, totlines, rows, LINEPRSRV, count)
-                    y += rows - LINEPRSRV
+                    new_y = y + rows - LINEPRSRV
+                    # Skip forward through empty pages if the new position is empty
+                    if is_page_empty(src_lines, new_y, rows):
+                        new_y = skip_empty_pages_forward(src_lines, new_y, rows, totlines)
+                    y = new_y
                 elif index != len(contents)-1:
                     return 1, width, 0, None
-            elif k in HALF_UP:
-                countstring = str(rows//2)
-                k = list(SCROLL_UP)[0]
-                continue
-            elif k in HALF_DOWN:
-                countstring = str(rows//2)
-                k = list(SCROLL_DOWN)[0]
-                continue
             elif k in CH_NEXT:
+                CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
                 if index + count < len(contents) - 1:
                     return count, width, 0, None
                 if index + count >= len(contents) - 1:
                     return len(contents) - index - 1, width, 0, None
             elif k in CH_PREV:
+                CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
                 if index - count > 0:
                    return -count, width, 0, None
                 elif index - count <= 0:
@@ -2822,108 +4497,767 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 k = help(stdscr)
                 if k in {curses.KEY_RESIZE}|META|TOC:
                     continue
-            elif k == WIDEN and (width + count) < cols - 4:
-                width += count
-                return 0, width, 0, y/totlines
-            elif k == SHRINK:
-                width -= count
-                if width < 20:
-                    width = 20
-                return 0, width, 0, y/totlines
-            elif k == WIDTH:
-                if countstring == "":
-                    # if called without a count, toggle between responsive width and full width
-                    margin = 8
-                    max_width = 100
-                    responsive_width = min(max_width, max(20, cols - margin))
-                    
-                    if width != responsive_width and cols - 4 >= responsive_width:
-                        return 0, responsive_width, 0, y/totlines
-                    else:
-                        return 0, cols - 4, 0, y/totlines
-                else:
-                    width = count
-                if width < 20:
-                    width = 20
-                elif width >= cols - 4:
-                    width = cols - 4
-                return 0, width, 0, y/totlines
+            elif k == BOOKMARKS:
+                # Show bookmarks
+                selected_bookmark = bookmarks(stdscr)
+                if selected_bookmark == curses.KEY_RESIZE:
+                    k = curses.KEY_RESIZE
+                    continue
+                elif selected_bookmark:
+                    # User selected a bookmark - always return it (main loop will handle validation)
+                    return selected_bookmark  # Return bookmark info to main loop
+                
+                # Refresh screen after dialog
+                stdscr.clear()
+                stdscr.refresh()
+            elif k == SAVE_BOOKMARK:
+                # Save current position as bookmark
+                chapter_title = "Chapter ?"
+                try:
+                    if toc_src and index < len(toc_src):
+                        chapter_title = toc_src[index]
+                except:
+                    pass
+                position_pct = int((y/totlines) * 100) if totlines > 0 else 0
+                add_bookmark(ebook, index, chapter_title, y, y/totlines)
+                # Show brief confirmation
+                stdscr.addstr(rows-1, 0, " Bookmark saved! ", curses.A_REVERSE)
+                stdscr.refresh()
+                curses.napms(1500)  # Show for 1.5 seconds
+                
+                # Refresh screen after dialog
+                stdscr.clear()
+                stdscr.refresh()
             # elif k == ord("0"):
             #     if width != 80 and cols - 2 >= 80:
             #         return 0, 80, 0, y/totlines
             #     else:
             #         return 0, cols - 2, 0, y/totlines
             elif k == ord("/"):
-                ks, idxs = searching(stdscr, pad, src_lines, width, y, index, len(contents))
-                if ks in {curses.KEY_RESIZE, ord("/")}:
-                    k = ks
-                    continue
-                elif SEARCHPATTERN is not None:
-                    return idxs, width, 0, None
-                elif idxs is not None:
-                    y = idxs
-            elif k == ord("o") and VWR is not None:
-                gambar, idx = [], []
+                # Use unified search dialog
+                search_term = search_dialog(stdscr)
+                if search_term:
+                    CURRENT_SEARCH_TERM = search_term  # Store for highlighting
+                    # DEBUG: Log that we set the search term
+                    try:
+                        with open('/tmp/search_debug.log', 'w') as f:
+                            f.write(f"SEARCH DEBUG: Set CURRENT_SEARCH_TERM to '{search_term}'\n")
+                    except:
+                        pass
+                    
+                    # Initialize whole-book search tracking
+                    WHOLE_BOOK_SEARCH_START = index
+                    WHOLE_BOOK_SEARCH_VISITED = [index]
+                    
+                    # Find first occurrence of search term in current chapter
+                    found_in_chapter = False
+                    for i, line in enumerate(src_lines[y:], y):
+                        if search_term.lower() in line.lower():
+                            y = i
+                            found_in_chapter = True
+                            break
+                    
+                    if found_in_chapter:
+                        # Found in current chapter - reset whole-book search and stay here
+                        WHOLE_BOOK_SEARCH_START = None
+                        WHOLE_BOOK_SEARCH_VISITED = []
+                        return 0, width, y, y/totlines if totlines > 0 else 0
+                    else:
+                        # Not found in current chapter, offer whole-book search
+                        whole_book_result = offer_whole_book_search(stdscr, search_term, ebook, index, y, width)
+                        if whole_book_result:
+                            return whole_book_result
+                        else:
+                            # User said no to whole-book search
+                            WHOLE_BOOK_SEARCH_START = None
+                            WHOLE_BOOK_SEARCH_VISITED = []
+                else:
+                    CURRENT_SEARCH_TERM = None  # Clear search term if cancelled
+            elif k == ord("u"):  # Open URL
+                # Find URLs in visible area
+                import re
+                import subprocess
+                import webbrowser
+                
+                urls = []
+                seen_urls = set()  # Track URLs we've already found to avoid duplicates
+                seen_domains = {}  # Track domain->url mapping to prefer https over http
+                
                 for n, i in enumerate(src_lines[y:y+rows]):
-                    img = re.search(r"(?<=\[IMG:)[0-9]+(?=\])", i)
-                    if img is not None:
-                        gambar.append(img.group())
-                        idx.append(n)
-
-                impath = ""
-                if len(gambar) == 1:
-                    impath = imgs[int(gambar[0])]
-                elif len(gambar) > 1:
-                    p, i = 0, 0
-                    while p not in QUIT and p not in FOLLOW:
-                        stdscr.move(idx[i], x + width//2 + len(gambar[i]) + 1)
+                    # First, find complete URLs with schemes using central function
+                    url_data = find_urls_in_text(i)
+                    complete_matches = []
+                    for url, start, end in url_data:
+                        class MockMatch:
+                            def __init__(self, text, start, end):
+                                self._text = text
+                                self._start = start
+                                self._end = end
+                            def group(self): return self._text
+                            def start(self): return self._start
+                            def end(self): return self._end
+                        complete_matches.append(MockMatch(url, start, end))
+                    
+                    covered_ranges = []  # Track character ranges covered by complete URLs
+                    
+                    for match in complete_matches:
+                        url = match.group()
+                        if '.' in url and len(url) > 5:
+                            # Extract domain (without scheme) for deduplication
+                            if url.startswith('https://'):
+                                domain_part = url[8:]  # Remove 'https://'
+                                scheme = 'https'
+                            elif url.startswith('http://'):
+                                domain_part = url[7:]   # Remove 'http://'
+                                scheme = 'http'
+                            else:
+                                domain_part = url
+                                scheme = None
+                            
+                            # Check if we've seen this domain before
+                            if domain_part in seen_domains:
+                                existing_url, existing_line = seen_domains[domain_part]
+                                existing_scheme = 'https' if existing_url.startswith('https://') else 'http'
+                                
+                                # Prefer https over http
+                                if scheme == 'https' and existing_scheme == 'http':
+                                    # Replace http version with https version
+                                    urls = [(u, ln) for u, ln in urls if u != existing_url]
+                                    urls.append((url, n))
+                                    seen_domains[domain_part] = (url, n)
+                                    seen_urls.add(url)
+                                    seen_urls.discard(existing_url)
+                                elif scheme == 'http' and existing_scheme == 'https':
+                                    # Skip http version, we already have https
+                                    pass
+                                # If both same scheme or no clear preference, skip duplicate
+                            else:
+                                # New domain, add it
+                                urls.append((url, n))
+                                seen_urls.add(url)
+                                seen_domains[domain_part] = (url, n)
+                            
+                            covered_ranges.append((match.start(), match.end()))
+                    
+                    # Then, find URL fragments that aren't part of complete URLs
+                    fragment_pattern = r'[a-zA-Z0-9._/\-~?&=#+%]+\.[a-zA-Z]{2,}[a-zA-Z0-9._/\-~?&=#+%]*'
+                    fragment_matches = re.finditer(fragment_pattern, i)
+                    
+                    for match in fragment_matches:
+                        # Check if this fragment overlaps with any complete URL
+                        fragment_start, fragment_end = match.start(), match.end()
+                        overlaps = any(start <= fragment_start < end or start < fragment_end <= end 
+                                     for start, end in covered_ranges)
+                        
+                        if not overlaps:
+                            fragment = match.group()
+                            if '.' in fragment and len(fragment) > 5:
+                                url = 'https://' + fragment
+                                # Check domain deduplication for fragments too
+                                if fragment not in seen_domains:
+                                    urls.append((url, n))
+                                    seen_urls.add(url)
+                                    seen_domains[fragment] = (url, n)
+                
+                if urls:
+                    if len(urls) == 1:
+                        # Single URL found, open it directly
+                        url_to_open = urls[0][0]
+                        try:
+                            # Try to use xdg-open (Linux), open (macOS), or start (Windows)
+                            # Redirect stdout and stderr to suppress debug output
+                            if os.name == 'posix':
+                                subprocess.run(['xdg-open', url_to_open], 
+                                             stdout=subprocess.DEVNULL, 
+                                             stderr=subprocess.DEVNULL,
+                                             check=False)
+                            elif os.name == 'nt':
+                                subprocess.run(['start', url_to_open], shell=True, 
+                                             stdout=subprocess.DEVNULL, 
+                                             stderr=subprocess.DEVNULL,
+                                             check=False)
+                            else:
+                                webbrowser.open(url_to_open)
+                        except:
+                            # Fallback to webbrowser module
+                            webbrowser.open(url_to_open)
+                    else:
+                        # Multiple URLs found, deduplicate first
+                        # First, deduplicate by cleaned display URL
+                        unique_urls = []
+                        seen_display_urls = set()
+                        
+                        for url, line_num in urls[:9]:  # Process up to 9 URLs
+                            # Prefer https over http and clean up display
+                            clean_url = url.replace('http://', 'https://', 1) if url.startswith('http://') else url
+                            # Remove any trailing punctuation for display
+                            clean_url = clean_url.rstrip('.,;:!?)]}>') 
+                            
+                            # Only add if we haven't seen this cleaned URL before
+                            if clean_url not in seen_display_urls:
+                                seen_display_urls.add(clean_url)
+                                unique_urls.append((url, line_num, clean_url))
+                        
+                        # If deduplication resulted in only one unique URL, open it directly
+                        if len(unique_urls) == 1:
+                            url_to_open = unique_urls[0][0]
+                            try:
+                                # Try to use xdg-open (Linux), open (macOS), or start (Windows)
+                                # Redirect stdout and stderr to suppress debug output
+                                if os.name == 'posix':
+                                    subprocess.run(['xdg-open', url_to_open], 
+                                                 stdout=subprocess.DEVNULL, 
+                                                 stderr=subprocess.DEVNULL,
+                                                 check=False)
+                                elif os.name == 'nt':
+                                    subprocess.run(['start', url_to_open], shell=True, 
+                                                 stdout=subprocess.DEVNULL, 
+                                                 stderr=subprocess.DEVNULL,
+                                                 check=False)
+                                else:
+                                    webbrowser.open(url_to_open)
+                            except:
+                                # Fallback to webbrowser module
+                                webbrowser.open(url_to_open)
+                        else:
+                            # Multiple unique URLs, show selection menu
+                            stdscr.clear()
+                            stdscr.addstr(0, 0, "Multiple URLs found. Select one to open:")
+                            for i, (original_url, line_num, clean_url) in enumerate(unique_urls):
+                                # Truncate very long URLs for display
+                                display_url = clean_url if len(clean_url) < 60 else clean_url[:57] + "..."
+                                stdscr.addstr(i + 2, 0, f"{i+1}. {display_url}")
+                            
+                            # Update the urls list to use the unique ones for selection
+                            urls = [(original_url, line_num) for original_url, line_num, _ in unique_urls]
+                            stdscr.addstr(len(urls) + 3, 0, "Press 1-9 to open a URL, or any other key to cancel")
+                            stdscr.refresh()
+                            
+                            choice = stdscr.getch()
+                            
+                            # Exit on resize - return to main reader immediately
+                            if choice == curses.KEY_RESIZE:
+                                # Don't clear screen, let main reader handle redraw
+                                k = curses.KEY_RESIZE
+                            elif ord('1') <= choice <= ord('9') and choice - ord('1') < len(urls):
+                                url_to_open = urls[choice - ord('1')][0]
+                                try:
+                                    if os.name == 'posix':
+                                        subprocess.run(['xdg-open', url_to_open], 
+                                                     stdout=subprocess.DEVNULL, 
+                                                     stderr=subprocess.DEVNULL,
+                                                     check=False)
+                                    else:
+                                        webbrowser.open(url_to_open)
+                                except:
+                                    webbrowser.open(url_to_open)
+                            # Clear screen and return to normal display
+                            stdscr.clear()
+                            stdscr.refresh()
+                            # Force pad refresh to redraw the content
+                            try:
+                                pad.refresh(y,0, 0,x, rows-1,x+width)
+                            except curses.error:
+                                pass
+            elif k == ord("i"):  # Open image
+                # Find only images that are visible or overlapping with current viewport
+                import re
+                import subprocess
+                import tempfile
+                
+                # Get visible/overlapping images instead of all chapter images
+                visible_images = get_visible_images(src_lines, imgs, y, rows, image_line_map)
+                
+                if visible_images:
+                    if len(visible_images) == 1:
+                        # Single image found, open it directly
+                        img_path = visible_images[0][0]
+                        try:
+                            # Get correct image path using dots_path
+                            imgsrc = dots_path(chpath, img_path)
+                            
+                            # Extract and save the image to temp file
+                            img_data = ebook.file.read(imgsrc)
+                            
+                            # Determine file extension
+                            ext = os.path.splitext(img_path)[1] or '.png'
+                            
+                            # Create temp file
+                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                                tmp.write(img_data)
+                                tmp_path = tmp.name
+                            
+                            # Open with system default viewer
+                            if os.name == 'posix':
+                                subprocess.run(['xdg-open', tmp_path], 
+                                             stdout=subprocess.DEVNULL, 
+                                             stderr=subprocess.DEVNULL,
+                                             check=False)
+                            elif os.name == 'nt':
+                                subprocess.run(['start', tmp_path], shell=True, 
+                                             stdout=subprocess.DEVNULL, 
+                                             stderr=subprocess.DEVNULL,
+                                             check=False)
+                            else:
+                                subprocess.run(['open', tmp_path], 
+                                             stdout=subprocess.DEVNULL, 
+                                             stderr=subprocess.DEVNULL,
+                                             check=False)
+                        except Exception as e:
+                            # Show error briefly (single image case)
+                            pass  # Can't show error in single image case without clearing screen
+                    else:
+                        # Multiple images found, let user choose with pagination support
+                        current_page = 0
+                        images_per_page = 8  # Will be adjusted based on screen size (up to 4x2)
+                        
+                        while True:
+                            stdscr.clear()
+                            
+                            # Calculate images for current page
+                            start_idx = current_page * images_per_page
+                            end_idx = min(start_idx + images_per_page, len(visible_images))
+                            current_images = visible_images[start_idx:end_idx]
+                            
+                            # EXPERIMENTAL: Use full screen for larger thumbnails
+                            left_margin = 1  # Absolute minimal margin
+                            
+                            # Use maximum available space
+                            available_width = cols - 2  # Just 1 char margin on each side
+                            available_height = rows - 2  # Just footer (1) + 1 line blank at top for sanity
+                            
+                            # Simple grid: 2 columns for 80+ width screens
+                            if cols >= 80:
+                                # Normal or wide screen - 2 columns
+                                max_cols = 2
+                                max_rows = 3  # Up to 6 images
+                            else:
+                                # Narrow screen (less than 80) - 1 column
+                                max_cols = 1
+                                max_rows = 4  # Up to 4 images stacked
+                            
+                            # Calculate maximum thumbnail size based on grid
+                            # Minimal gaps between thumbnails (1 char horizontal, 1 line vertical)
+                            thumb_width = (available_width - (max_cols - 1) * 1) // max_cols
+                            thumb_height = (available_height - (max_rows - 1) * 1 - max_rows) // max_rows  # -max_rows for labels
+                            
+                            # Ensure minimum viable size
+                            thumb_width = max(8, thumb_width)
+                            thumb_height = max(4, thumb_height)
+                            
+                            # Limit to reasonable maximums (increased for full-screen usage)
+                            thumb_width = min(thumb_width, 60)  # Increased from 40
+                            thumb_height = min(thumb_height, 30)  # Increased from 20
+                            
+                            # Calculate actual spacing between thumbnails
+                            # Distribute remaining space evenly
+                            total_thumb_width = max_cols * thumb_width
+                            total_thumb_height = max_rows * (thumb_height + 1)  # +1 for labels
+                            
+                            h_spacing = max(0, (available_width - total_thumb_width) // (max_cols + 1))
+                            v_spacing = max(0, (available_height - total_thumb_height) // (max_rows + 1))
+                            
+                            # Very minimal spacing
+                            h_spacing = max(0, min(1, h_spacing))  # At most 1 char spacing
+                            v_spacing = max(0, min(1, v_spacing))  # At most 1 line spacing
+                            
+                            # For compatibility with existing code
+                            chars_per_thumbnail = thumb_width + h_spacing
+                            max_possible_cols = max_cols  # Already calculated above
+                            
+                            # Determine grid layout based on what actually fits
+                            if max_possible_cols >= 4 and rows >= 24:  # 4 columns if very wide
+                                max_cols = 4
+                                max_rows = 2
+                                max_thumbnails = 8
+                            elif max_possible_cols >= 3 and rows >= 20:  # 3 columns 
+                                max_cols = 3
+                                max_rows = 2
+                                max_thumbnails = 6
+                            elif max_possible_cols >= 2 and rows >= 16:  # 2 columns
+                                max_cols = 2 
+                                max_rows = 2
+                                max_thumbnails = 4
+                            else:  # Only 1 column fits or very narrow terminal
+                                max_cols = 1
+                                max_rows = min(3, (rows - 8) // (thumb_height + 4))  # Stack vertically
+                                max_thumbnails = max_rows
+                                
+                            # Adjust height based on available space
+                            available_height = rows - 8
+                            max_thumb_height = (available_height // max_rows) - 3  # Leave space for labels
+                            thumb_height = min(thumb_height, max_thumb_height, 12)
+                            
+                            # Update images_per_page based on layout
+                            images_per_page = max_thumbnails
+                            
+                            # Only show thumbnails up to the number we can display 
+                            display_count = min(len(current_images), max_thumbnails)
+                            
+                            # Debug: show terminal size vs layout
+                            if os.getenv('TERMBOOK_DEBUG'):
+                                print(f"DEBUG: Terminal {cols}x{rows}, can fit {max_cols}x{max_rows} = {max_thumbnails} thumbnails", file=sys.stderr)
+                            
+                            # Try to show thumbnails if PIL is available and we have images to display
+                            if PIL_AVAILABLE and COLORSUPPORT and display_count > 0:
+                                # Leave top line blank for sanity (no redundant header text)
+                                
+                                # Show thumbnails with fluid layout
+                                for idx in range(display_count):
+                                    img_path, line_num, img_idx = current_images[idx]
+                                    
+                                    # Calculate grid position - fill columns first
+                                    grid_row = idx // max_cols
+                                    grid_col = idx % max_cols
+                                
+                                    # Starting position using calculated spacing to fill screen
+                                    # +1 to account for blank top line
+                                    start_y = 1 + v_spacing + (grid_row * (thumb_height + v_spacing + 1))  # +1 for label
+                                    start_x = h_spacing + (grid_col * (thumb_width + h_spacing))
+                                    
+                                    # Draw number at exact thumbnail position minus one row
+                                    thumb_start_y = start_y + 1  # Where thumbnail actually starts
+                                    thumb_start_x = start_x     # Where thumbnail actually starts
+                                    
+                                    # Place number one row above thumbnail
+                                    number_y = thumb_start_y - 1
+                                    number_x = thumb_start_x
+                                    
+                                    if number_y >= 0 and number_y < rows and number_x >= 0 and number_x + 5 < cols:
+                                        try:
+                                            stdscr.addstr(number_y, number_x, f"[{idx+1}]", curses.A_BOLD)
+                                        except curses.error:
+                                            pass
+                                
+                                    try:
+                                        # Load and create mini thumbnail
+                                        imgsrc = dots_path(chpath, img_path)
+                                        img_data = ebook.file.read(imgsrc)
+                                        from PIL import Image
+                                        from io import BytesIO
+                                        img = Image.open(BytesIO(img_data))
+                                    
+                                        # Convert to RGB if needed
+                                        if img.mode != 'RGB':
+                                            img = img.convert('RGB')
+                                        
+                                        # Keep original image for sampling - don't resize yet
+                                        orig_width, orig_height = img.size
+                                        
+                                        # Calculate actual thumbnail size maintaining aspect ratio
+                                        max_thumb_width = thumb_width
+                                        max_thumb_height = thumb_height - 1  # Reserve 1 line for alt text
+                                        
+                                        # Account for character aspect ratio (chars are ~2x taller than wide)
+                                        # So we need to adjust for proper visual aspect ratio
+                                        # Each character height represents 2 pixels vertically (half-block)
+                                        adjusted_max_height = max_thumb_height * 2  # Double for half-block technique
+                                        
+                                        # Calculate scaling to fit within bounds while maintaining aspect ratio
+                                        width_scale = max_thumb_width / orig_width
+                                        height_scale = adjusted_max_height / orig_height
+                                        scale = min(width_scale, height_scale)
+                                        
+                                        # Calculate actual display dimensions
+                                        actual_thumb_width = max(1, int(orig_width * scale))
+                                        actual_pixel_height = max(2, int(orig_height * scale))
+                                        
+                                        # Ensure pixel height is even for half-block pairing
+                                        if actual_pixel_height % 2 == 1:
+                                            actual_pixel_height += 1
+                                        
+                                        # Convert pixel height back to character height
+                                        actual_thumb_height = actual_pixel_height // 2
+                                        
+                                        # Ensure we don't exceed maximums
+                                        actual_thumb_width = min(actual_thumb_width, max_thumb_width)
+                                        actual_thumb_height = min(actual_thumb_height, max_thumb_height)
+                                        
+                                        # Center the thumbnail within its allocated space
+                                        h_offset = (max_thumb_width - actual_thumb_width) // 2
+                                        v_offset = (max_thumb_height - actual_thumb_height) // 2
+                                        
+                                        # Adjust starting position for centering
+                                        centered_start_x = start_x + h_offset
+                                        centered_start_y = start_y + 1 + v_offset
+                                        
+                                        # Sample directly from original full-resolution image using half-block technique
+                                        # Each character represents 2 pixels vertically (upper and lower half)
+                                        for char_y in range(actual_thumb_height):
+                                            if centered_start_y + char_y >= rows:
+                                                break
+                                            
+                                            for char_x in range(actual_thumb_width):
+                                                if centered_start_x + char_x >= cols:
+                                                    break
+                                                    
+                                                # Map thumbnail character position to original image region
+                                                # Each character represents 2 vertical pixels (upper and lower half)
+                                                # We already calculated actual_pixel_height above maintaining aspect ratio
+                                                
+                                                # Use floating point coordinates with safe border offset
+                                                border_offset = 0.5  # Offset by half a pixel to avoid exact edges
+                                                safe_width = orig_width - 1  # Leave 1 pixel margin
+                                                safe_height = orig_height - 1  # Leave 1 pixel margin
+                                                
+                                                # Map character position to image coordinates
+                                                img_x_start = border_offset + (char_x * safe_width) / actual_thumb_width
+                                                img_x_end = border_offset + ((char_x + 1) * safe_width) / actual_thumb_width
+                                                
+                                                # Each character row represents 2 image rows
+                                                img_y_top = border_offset + (char_y * 2 * safe_height) / actual_pixel_height
+                                                img_y_middle = border_offset + ((char_y * 2 + 1) * safe_height) / actual_pixel_height
+                                                img_y_bottom = border_offset + ((char_y * 2 + 2) * safe_height) / actual_pixel_height
+                                                
+                                                # Sample colors for upper half of character
+                                                top_colors = []
+                                                samples_per_dim = 4  # 4x4 sampling grid
+                                                
+                                                for sample_y in range(samples_per_dim):
+                                                    for sample_x in range(samples_per_dim):
+                                                        # Calculate position within upper half
+                                                        precise_x = img_x_start + (sample_x * (img_x_end - img_x_start)) / samples_per_dim
+                                                        precise_y = img_y_top + (sample_y * (img_y_middle - img_y_top)) / samples_per_dim
+                                                        
+                                                        # Convert to integer for pixel access, with bounds checking
+                                                        pixel_x = min(int(precise_x), orig_width - 1)
+                                                        pixel_y = min(int(precise_y), orig_height - 1)
+                                                        
+                                                        r, g, b = img.getpixel((pixel_x, pixel_y))
+                                                        top_colors.append((r, g, b))
+                                                
+                                                # Sample colors for lower half of character
+                                                bottom_colors = []
+                                                
+                                                for sample_y in range(samples_per_dim):
+                                                    for sample_x in range(samples_per_dim):
+                                                        # Calculate position within lower half
+                                                        precise_x = img_x_start + (sample_x * (img_x_end - img_x_start)) / samples_per_dim
+                                                        precise_y = img_y_middle + (sample_y * (img_y_bottom - img_y_middle)) / samples_per_dim
+                                                        
+                                                        # Convert to integer for pixel access, with bounds checking
+                                                        pixel_x = min(int(precise_x), orig_width - 1)
+                                                        pixel_y = min(int(precise_y), orig_height - 1)
+                                                        
+                                                        r, g, b = img.getpixel((pixel_x, pixel_y))
+                                                        bottom_colors.append((r, g, b))
+                                                
+                                                # Average colors for each half
+                                                if top_colors:
+                                                    avg_top = tuple(sum(c[i] for c in top_colors) // len(top_colors) for i in range(3))
+                                                else:
+                                                    avg_top = (128, 128, 128)
+                                                
+                                                if bottom_colors:
+                                                    avg_bottom = tuple(sum(c[i] for c in bottom_colors) // len(bottom_colors) for i in range(3))
+                                                else:
+                                                    avg_bottom = (128, 128, 128)
+                                                
+                                                # Use the half-block technique with foreground/background colors
+                                                # Try to get color pair with potential reversal
+                                                color_pair, use_reversed = get_color_pair_with_reversal(avg_top, avg_bottom, allow_reversal=True)
+                                                
+                                                try:
+                                                    if color_pair and COLORSUPPORT:
+                                                        if use_reversed:
+                                                            # Use lower half block with reversed colors
+                                                            stdscr.addstr(centered_start_y + char_y, centered_start_x + char_x, '▄', curses.color_pair(color_pair))
+                                                        else:
+                                                            # Use upper half block with normal colors
+                                                            stdscr.addstr(centered_start_y + char_y, centered_start_x + char_x, '▀', curses.color_pair(color_pair))
+                                                    else:
+                                                        # Fallback to simple character based on luminance
+                                                        top_lum = int(0.299 * avg_top[0] + 0.587 * avg_top[1] + 0.114 * avg_top[2])
+                                                        bottom_lum = int(0.299 * avg_bottom[0] + 0.587 * avg_bottom[1] + 0.114 * avg_bottom[2])
+                                                        
+                                                        if top_lum > 200 and bottom_lum > 200:
+                                                            char = ' '  # Both bright
+                                                        elif top_lum < 50 and bottom_lum < 50:
+                                                            char = '█'  # Both dark
+                                                        elif top_lum > bottom_lum:
+                                                            char = '▀'  # Top brighter
+                                                        else:
+                                                            char = '▄'  # Bottom brighter
+                                                        
+                                                        stdscr.addstr(centered_start_y + char_y, centered_start_x + char_x, char)
+                                                except curses.error:
+                                                    pass
+                                    
+                                        # Show enhanced label with figure number below thumbnail (centered)
+                                        # Use precise line mapping to get the actual line where this image appears
+                                        actual_line_num = line_num
+                                        if image_line_map:
+                                            # Find the first line where this image appears
+                                            for i, mapped_img_idx in enumerate(image_line_map):
+                                                if mapped_img_idx == img_idx:
+                                                    actual_line_num = i
+                                                    break
+                                        label = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, actual_line_num)
+                                        # Truncate to fit thumbnail width
+                                        if len(label) > actual_thumb_width:
+                                            label = label[:actual_thumb_width - 3] + "..."
+                                        
+                                        # Center the label under the thumbnail
+                                        label_x = centered_start_x + (actual_thumb_width - len(label)) // 2
+                                        label_y = centered_start_y + actual_thumb_height
+                                        
+                                        if label_y < rows and label_x >= 0 and label_x + len(label) < cols:
+                                            try:
+                                                stdscr.addstr(label_y, label_x, label, curses.A_DIM)
+                                            except curses.error:
+                                                pass
+                                    except:
+                                        # If thumbnail fails, show enhanced label
+                                        label = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, line_num)
+                                        # Truncate to fit available width
+                                        if len(label) > actual_thumb_width:
+                                            label = label[:actual_thumb_width - 3] + "..."
+                                        if start_y + 1 < rows and start_x >= 0 and start_x + len(label) < cols:
+                                            try:
+                                                stdscr.addstr(start_y + 1, start_x, label)
+                                            except curses.error:
+                                                pass
+                                
+                                # Show navigation instructions with specific quit key
+                                footer = f"Press 1-{display_count} to open image"
+                                if len(visible_images) > max_thumbnails:
+                                    footer += ", n/p for next/prev page"
+                                footer += ", q to quit"
+                                stdscr.addstr(rows - 1, 0, footer[:cols-1])
+                            else:
+                                # Fallback to text list with pagination
+                                header = f"Found {len(visible_images)} images. Select one to open:"
+                                if len(visible_images) > images_per_page:
+                                    total_pages = (len(visible_images) + images_per_page - 1) // images_per_page
+                                    header += f" Page {current_page + 1}/{total_pages}"
+                                stdscr.addstr(0, 0, header)
+                                
+                                # Calculate how many images we can show based on screen height
+                                available_lines = rows - 4  # Reserve lines for header and footer
+                                num_to_show = min(len(current_images), available_lines)
+                                
+                                for i in range(num_to_show):
+                                    img_path, line_num, img_idx = current_images[i]
+                                    # Use enhanced label with figure number
+                                    display_name = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, line_num)
+                                        
+                                    # Truncate to fit screen width
+                                    max_width = cols - 5  # Account for "1. " prefix
+                                    if len(display_name) > max_width:
+                                        display_name = display_name[:max_width-3] + "..."
+                                        
+                                    # Only add if it fits on screen
+                                    if i + 2 < rows - 1:
+                                        stdscr.addstr(i + 2, 0, f"{i+1}. {display_name}")
+                                
+                                # Show navigation instructions
+                                if rows - 1 > num_to_show + 2:
+                                    footer = "Press 1-9 to open image"
+                                    if len(visible_images) > images_per_page:
+                                        footer += ", n/p for next/prev page"
+                                    footer += ", or any other key to cancel"
+                                    stdscr.addstr(rows - 1, 0, footer[:cols-1])
+                            stdscr.refresh()
+                            
+                            choice = stdscr.getch()
+                            
+                            # Handle navigation
+                            if choice == curses.KEY_RESIZE:
+                                # Exit on resize - let main reader handle redraw
+                                k = curses.KEY_RESIZE
+                                break
+                            elif choice == ord('q') or choice == ord('Q'):  # q or Q to exit
+                                # Quit explicitly - clear screen first for clean return to reader
+                                stdscr.clear()
+                                stdscr.refresh()
+                                break
+                            elif choice == ord('n') or choice == ord('N'):
+                                # Next page
+                                if max_thumbnails > 0:
+                                    total_pages = (len(visible_images) + max_thumbnails - 1) // max_thumbnails
+                                    if current_page < total_pages - 1:
+                                        current_page += 1
+                                continue
+                            elif choice == ord('p') or choice == ord('P'):
+                                # Previous page
+                                if current_page > 0:
+                                    current_page -= 1
+                                continue
+                            elif ord('1') <= choice <= ord('8'):
+                                # Select image from current page (only up to display_count, max 8)
+                                choice_idx = choice - ord('1')
+                                if choice_idx < display_count:
+                                    selected_idx = start_idx + choice_idx
+                                    if selected_idx < len(visible_images):
+                                        img_path = visible_images[selected_idx][0]
+                                        try:
+                                            # Get correct image path using dots_path
+                                            imgsrc = dots_path(chpath, img_path)
+                                            
+                                            # Extract and save the image to temp file
+                                            img_data = ebook.file.read(imgsrc)
+                                            
+                                            # Determine file extension
+                                            ext = os.path.splitext(img_path)[1] or '.png'
+                                            
+                                            # Create temp file
+                                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                                                tmp.write(img_data)
+                                                tmp_path = tmp.name
+                                    
+                                            # Open with system default viewer
+                                            if os.name == 'posix':
+                                                subprocess.run(['xdg-open', tmp_path], 
+                                                             stdout=subprocess.DEVNULL, 
+                                                             stderr=subprocess.DEVNULL,
+                                                             check=False)
+                                            elif os.name == 'nt':
+                                                subprocess.run(['start', tmp_path], shell=True, 
+                                                             stdout=subprocess.DEVNULL, 
+                                                             stderr=subprocess.DEVNULL,
+                                                             check=False)
+                                            else:
+                                                subprocess.run(['open', tmp_path], 
+                                                             stdout=subprocess.DEVNULL, 
+                                                             stderr=subprocess.DEVNULL,
+                                                             check=False)
+                                            # Continue to redraw thumbnails after opening image
+                                            continue
+                                        except Exception as e:
+                                            # Show error briefly if something goes wrong
+                                            stdscr.addstr(rows - 1, 0, f"Error: {str(e)[:60]}")
+                                            stdscr.refresh()
+                                            curses.napms(2000)  # Show for 2 seconds
+                                            continue  # Redraw thumbnails after showing error
+                            # Continue loop for any other keys (no action)
+                        # Return to normal display - clear screen for main reader redraw
+                        stdscr.clear()
                         stdscr.refresh()
-                        curses.curs_set(1)
-                        p = pad.getch()
-                        if p in SCROLL_DOWN:
-                            i += 1
-                        elif p in SCROLL_UP:
-                            i -= 1
-                        i = i % len(gambar)
-
-                    curses.curs_set(0)
-                    if p in FOLLOW:
-                        impath = imgs[int(gambar[i])]
-
-                if impath != "":
-                    imgsrc = dots_path(chpath, impath)
-                    k = open_media(pad, ebook, imgsrc)
-                    continue
-            elif k == MARKPOS:
-                jumnum = pad.getch()
-                if jumnum in range(49, 58):
-                    JUMPLIST[chr(jumnum)] = [index, width, y, y/totlines]
                 else:
-                    k = jumnum
-                    continue
-            elif k == JUMPTOPOS:
-                jumnum = pad.getch()
-                if jumnum in range(49, 58) and chr(jumnum) in JUMPLIST.keys():
-                    tojumpidxdiff = JUMPLIST[chr(jumnum)][0]-index
-                    tojumpy = JUMPLIST[chr(jumnum)][2]
-                    tojumpctg = None if JUMPLIST[chr(jumnum)][1] == width else JUMPLIST[chr(jumnum)][3]
-                    return tojumpidxdiff, width, tojumpy, tojumpctg
-                else:
-                    k = jumnum
-                    continue
-            elif k == COLORSWITCH and COLORSUPPORT and countstring in {"", "0", "1", "2"}:
-                if countstring == "":
-                    count_color = curses.pair_number(stdscr.getbkgd())
-                    if count_color not in {2, 3}: count_color = 1
-                    count_color = count_color % 3
-                else:
-                    count_color = count
-                stdscr.bkgd(curses.color_pair(count_color+1))
+                    # No visible images found - show brief message
+                    stdscr.addstr(rows - 1, 0, " No images visible on this screen ", curses.A_REVERSE)
+                    stdscr.refresh()
+                    curses.napms(1500)  # Show for 1.5 seconds
+                    # Clear the message
+                    stdscr.addstr(rows - 1, 0, " " * min(35, cols))
+                    stdscr.refresh()
+                    # Redraw content
+                    try:
+                        pad.refresh(y,0, 0,x, rows-1,x+width)
+                    except curses.error:
+                        pass
+            elif k == COLORSWITCH and COLORSUPPORT:
+                # Simple cycling: 1->2->3->1 (default->dark->light->default)
+                current_color = curses.pair_number(stdscr.getbkgd())
+                next_color = (current_color % 3) + 1
+                stdscr.bkgd(curses.color_pair(next_color))
                 return 0, width, y, None
             elif k == curses.KEY_RESIZE:
+                # Clear any active modals on resize
+                Modal.handle_resize()
+                
                 savestate(ebook.path, index, width, y, y/totlines)
-                # stated in pypi windows-curses page:
-                # to call resize_term right after KEY_RESIZE
+                # Handle resize immediately - keep it simple
                 if sys.platform == "win32":
                     curses.resize_term(rows, cols)
                     rows, cols = stdscr.getmaxyx()
@@ -2932,10 +5266,21 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     curses.resize_term(rows, cols)
                 if cols < 22 or rows < 12:
                     sys.exit("ERR: Screen was too small (min 22cols x 12rows).")
-                if cols <= width + 4:
-                    return 0, cols - 4, 0, y/totlines
-                else:
-                    return 0, width, y, None
+                
+                # Calculate new width - be more generous with expansion
+                new_width = max(min(cols - 4, 120), 40)  # Between 40-120 chars, leave 4 char margin
+                
+                # Visual cue: show resize info briefly
+                try:
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, f"RESIZED: {cols}x{rows}, width: {width} -> {new_width}")
+                    stdscr.refresh()
+                    time.sleep(0.2)  # Show briefly
+                except:
+                    pass
+                
+                # Always re-render on resize
+                return 0, new_width, 0, y/totlines
             countstring = ""
 
         if svline != "dontsave":
@@ -2943,15 +5288,84 @@ def reader(stdscr, ebook, index, width, y, pctg):
         try:
             stdscr.clear()
             stdscr.addstr(0, 0, countstring)
+            
+            # Add debug info if --debug flag is used
+            if DEBUG_MODE:
+                # Handle None values safely
+                pctg_str = f"{pctg:.1f}%" if pctg is not None else "0.0%"
+                debug_info = f"DEBUG: Ch {index+1}/{len(contents)} | Pos {y}/{totlines} ({pctg_str}) | Built {__build_time__}"
+                try:
+                    stdscr.addstr(1, 0, debug_info[:cols-1], curses.A_DIM)  # Show on line 2, truncate if too long
+                except:
+                    pass  # Ignore if we can't fit the debug line
+            
             stdscr.refresh()
-            if totlines - y < rows:
-                pad.refresh(y,0, 0,x, totlines-y,x+width)
+            
+            # Check if URLs or images are visible to reserve bottom line
+            has_urls = check_urls_in_visible_area(src_lines, y, rows)
+            has_images = check_images_in_visible_area(src_lines, y, rows)
+            
+            # Adjust pad positioning if debug mode is active (debug takes up one more line)
+            pad_start_row = 2 if DEBUG_MODE else 1
+            # Reserve bottom line for hint if URLs or images are present
+            pad_end_row = rows - 2 if (has_urls or has_images) else rows - 1
+            available_rows = pad_end_row - pad_start_row + 1
+            
+            if totlines - y < available_rows:
+                pad.refresh(y,0, pad_start_row,x, totlines-y+pad_start_row-1,x+width)
             else:
-                pad.refresh(y,0, 0,x, rows-1,x+width)
+                pad.refresh(y,0, pad_start_row,x, pad_end_row,x+width)
         except curses.error:
             pass
+        
+        # Show persistent hint AFTER pad refresh (post-reader) or initial help message
+        if has_urls or has_images:
+            show_persistent_hint(stdscr, rows, cols, has_urls, has_images)
+            stdscr.refresh()
+        elif show_initial_help:
+            # Check if 5 seconds have passed since help message was shown
+            if time.time() - help_message_start_time > 5.0:
+                show_initial_help = False
+                INITIAL_HELP_SHOWN = True  # Mark as dismissed globally
+                # Clear the bottom line by refreshing the screen content
+                stdscr.clear()
+                stdscr.refresh()
+                try:
+                    if totlines - y < available_rows:
+                        pad.refresh(y,0, pad_start_row,x, totlines-y+pad_start_row-1,x+width)
+                    else:
+                        pad.refresh(y,0, pad_start_row,x, pad_end_row,x+width)
+                except curses.error:
+                    pass
+            else:
+                # Still showing help message
+                show_initial_help_message(stdscr, rows, cols)
+                stdscr.refresh()
+        
+        # Use a timeout for getch so we can check the timer periodically
+        pad.timeout(1000)  # 1 second timeout
         k = pad.getch()
-
+        pad.timeout(-1)  # Reset to blocking
+        
+        # Handle timeout (no key pressed)
+        if k == -1:  # Timeout occurred
+            continue  # Go back to check timer and redraw
+        
+        # Clear initial help message on any actual key press
+        if show_initial_help:
+            show_initial_help = False
+            INITIAL_HELP_SHOWN = True  # Mark as dismissed globally
+            # Clear the bottom line by refreshing the screen content
+            stdscr.clear()
+            stdscr.refresh()
+            try:
+                if totlines - y < available_rows:
+                    pad.refresh(y,0, pad_start_row,x, totlines-y+pad_start_row-1,x+width)
+                else:
+                    pad.refresh(y,0, pad_start_row,x, pad_end_row,x+width)
+            except curses.error:
+                pass
+            
         if svline != "dontsave":
             pad.chgat(svline, 0, width, curses.A_NORMAL)
             svline = "dontsave"
@@ -2966,6 +5380,8 @@ def preread(stdscr, file):
         curses.init_pair(1, -1, -1)
         curses.init_pair(2, DARK[0], DARK[1])
         curses.init_pair(3, LIGHT[0], LIGHT[1])
+        # Set initial color scheme to 1 (default)
+        stdscr.bkgd(curses.color_pair(1))
         COLORSUPPORT = True
         
         # Initialize smart color palette for image rendering
@@ -3027,11 +5443,80 @@ def preread(stdscr, file):
     find_media_viewer()
 
     while True:
-        incr, width, y, pctg = reader(stdscr, epub, idx, width, y, pctg)
+        result = reader(stdscr, epub, idx, width, y, pctg)
+        
+        # Check if result is a bookmark (dict) or normal navigation (tuple)
+        if isinstance(result, dict):
+            # User selected a bookmark - switch to that book
+            bookmark = result
+            bookmark_path = bookmark.get('path')
+            
+            
+            # Always clear screen when returning from bookmark selection
+            stdscr.clear()
+            stdscr.refresh()
+            
+            if bookmark_path and os.path.exists(bookmark_path) and bookmark_path != epub.path:
+                # Switch to the bookmarked book by restarting termbook
+                try:
+                    import sys
+                    import json
+                    
+                    # Save the bookmark position to a temporary state
+                    bookmark_idx = bookmark.get('chapter_index', 0)
+                    bookmark_y = bookmark.get('position', 0)
+                    bookmark_pctg = bookmark.get('percentage', 0.0)
+                    
+                    # Show switching message
+                    rows, cols = stdscr.getmaxyx()
+                    book_name = os.path.basename(bookmark_path)
+                    stdscr.addstr(rows-1, 0, f" Opening: {book_name[:50]}... ", curses.A_REVERSE)
+                    stdscr.refresh()
+                    curses.napms(1000)  # Show for 1 second
+                    
+                    # Store the bookmark position in the book's state
+                    if bookmark_path not in STATE:
+                        STATE[bookmark_path] = {}
+                    STATE[bookmark_path]["index"] = bookmark_idx
+                    STATE[bookmark_path]["y"] = bookmark_y
+                    STATE[bookmark_path]["pctg"] = bookmark_pctg
+                    STATE[bookmark_path]["width"] = width
+                    
+                    # Save state
+                    try:
+                        with open(STATEFILE, 'w') as f:
+                            json.dump(STATE, f, indent=2)
+                    except:
+                        pass
+                    
+                    # Exit and restart with the new book
+                    os.execv(sys.executable, [sys.executable] + [sys.argv[0]] + [bookmark_path])
+                    
+                except Exception as e:
+                    # Failed to restart, skip this bookmark
+                    continue
+            elif bookmark_path == epub.path:
+                # Same book, jump to bookmarked position
+                bookmark_idx = bookmark.get('chapter_index', 0)
+                # Validate chapter index is within bounds
+                idx = max(0, min(bookmark_idx, len(epub.contents) - 1)) if epub.contents else 0
+                y = bookmark.get('position', 0)
+                pctg = bookmark.get('percentage', 0.0)
+                # No chapter change animation needed
+                continue
+            else:
+                # Bookmark path doesn't exist, continue normally
+                continue
+        else:
+            # Normal navigation result
+            incr, width, y, pctg = result
         
         # Show loading animation for chapter transitions
         if incr != 0:  # Chapter navigation occurred
             import time
+            global LOADING_IN_PROGRESS
+            
+            LOADING_IN_PROGRESS = True
             
             # Start loading animation with spectrum effect
             animation_data = show_loading_animation(stdscr, "Loading chapter...")
@@ -3043,6 +5528,12 @@ def preread(stdscr, file):
                 update_loading_animation(stdscr, message, start_col, center_row, spectrum_colors, animation_step)
                 animation_step += 1
                 time.sleep(0.08)  # Slightly longer delay for better color visibility
+            
+            LOADING_IN_PROGRESS = False
+            
+            # Clear the screen after loading animation to prepare for new content
+            stdscr.clear()
+            stdscr.refresh()
         
         idx += incr
 
@@ -3065,8 +5556,56 @@ def main():
     if len({"-v", "--version", "-V"} & set(args)) != 0:
         print(__version__)
         print(__license__, "License")
-        print("Copyright (c) 2019", __author__)
+        print("Copyright (c) 2025", __author__)
         print(__url__)
+        sys.exit()
+
+    # Check for debug flag
+    global DEBUG_MODE
+    DEBUG_MODE = len({"--debug"} & set(args)) != 0
+
+    if len({"--clean", "--reset"} & set(args)) != 0:
+        # Clean up all saved state files
+        cleaned_files = []
+        
+        # Check for state files in various locations
+        state_locations = []
+        bookmark_locations = []
+        if os.getenv("HOME"):
+            state_locations.append(os.path.join(os.getenv("HOME"), ".termbook"))
+            state_locations.append(os.path.join(os.getenv("HOME"), ".config", "epr", "config"))
+            bookmark_locations.append(os.path.join(os.getenv("HOME"), ".termbook_bookmarks.json"))
+            bookmark_locations.append(os.path.join(os.getenv("HOME"), ".config", "termbook", "bookmarks.json"))
+        elif os.getenv("USERPROFILE"):
+            state_locations.append(os.path.join(os.getenv("USERPROFILE"), ".termbook"))
+            bookmark_locations.append(os.path.join(os.getenv("USERPROFILE"), ".termbook_bookmarks.json"))
+        
+        # Clean state files
+        for state_file in state_locations:
+            if os.path.exists(state_file):
+                try:
+                    os.remove(state_file)
+                    cleaned_files.append(state_file)
+                except Exception as e:
+                    print(f"Warning: Could not remove {state_file}: {e}")
+        
+        # Clean bookmark files
+        for bookmark_file in bookmark_locations:
+            if os.path.exists(bookmark_file):
+                try:
+                    os.remove(bookmark_file)
+                    cleaned_files.append(bookmark_file)
+                except Exception as e:
+                    print(f"Warning: Could not remove {bookmark_file}: {e}")
+        
+        if cleaned_files:
+            print("Cleaned up the following state files:")
+            for f in cleaned_files:
+                print(f"  - {f}")
+            print("\nTermbook has been reset to a fresh state.")
+            print("All bookmarks and reading positions have been removed.")
+        else:
+            print("No state files found. Termbook is already in a fresh state.")
         sys.exit()
 
     if len({"-d"} & set(args)) != 0:
@@ -3141,7 +5680,7 @@ def main():
                 parser.close()
             except:
                 pass
-            src_lines, imgs = parser.get_lines()
+            src_lines, imgs, img_alts = parser.get_lines()
             # sys.stdout.reconfigure(encoding="utf-8")  # Python>=3.7
             for j in src_lines:
                 sys.stdout.buffer.write((j+"\n\n").encode("utf-8"))
