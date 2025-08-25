@@ -54,7 +54,7 @@ The core EPUB reading functionality, curses interface, and navigation system are
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/leehanken/termbook.git
+git clone https://github.com/macsplit/termbook.git
 cd termbook
 
 # 2. Choose your installation method:
@@ -98,7 +98,7 @@ If you prefer manual control over the installation process:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/leehanken/termbook.git
+git clone https://github.com/macsplit/termbook.git
 cd termbook
 
 # 2. Create and activate virtual environment
@@ -159,7 +159,7 @@ termbook -r
 # Search history for a book
 termbook "python programming"
 
-# Dump EPUB contents (debug)
+# Dump EPUB contents as plain text
 termbook -d book.epub
 
 # Show help

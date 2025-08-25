@@ -39,7 +39,7 @@ Key Binding:
 
 
 __version__ = "1.1.0"
-__build_time__ = "2025-08-25 12:12:29"
+__build_time__ = "2025-08-25 12:33:34"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -244,11 +244,12 @@ class HTMLtoLines(HTMLParser):
     hide = {"script", "style", "head"}
     # hide = {"script", "style", "head", ", "sub}
 
-    def __init__(self):
+    def __init__(self, dump_mode=False):
         HTMLParser.__init__(self)
         self.text = [""]
         self.imgs = []
         self.img_alts = []  # Store alt text for images
+        self.dump_mode = dump_mode  # Flag for plain text dump mode
         self.ishead = False
         self.isinde = False
         self.isbull = False
@@ -271,6 +272,11 @@ class HTMLtoLines(HTMLParser):
         self.code_lang = None  # Track detected language for current code block
 
     def handle_starttag(self, tag, attrs):
+        # In dump mode, skip image and link tracking
+        if self.dump_mode:
+            if tag == "img":
+                return  # Skip images in dump mode
+        
         # Check for special classes on ANY tag (highest priority)
         for attr_name, attr_value in attrs:
             if attr_name == "class" and attr_value:
@@ -356,6 +362,9 @@ class HTMLtoLines(HTMLParser):
         # In HTML, both are startendtag (no need endtag)
         # but in XHTML both need endtag
         elif tag in {"img", "image"}:
+            if self.dump_mode:
+                # Skip images completely in dump mode
+                return
             img_src = None
             img_alt = ""
             for i in attrs:
@@ -373,6 +382,9 @@ class HTMLtoLines(HTMLParser):
         if tag == "br":
             self.text += [""]
         elif tag in {"img", "image"}:
+            if self.dump_mode:
+                # Skip images completely in dump mode
+                return
             img_src = None
             img_alt = ""
             for i in attrs:
@@ -470,7 +482,10 @@ class HTMLtoLines(HTMLParser):
                 line = line.replace(circled, f' {annotation}')
             
             # Special handling for links - use href for external URLs, keep text for internal refs
-            if self.current_link_href and re.match(r'https?://', self.current_link_href):
+            if self.dump_mode:
+                # In dump mode, just use the text content
+                self.text[-1] += line
+            elif self.current_link_href and re.match(r'https?://', self.current_link_href):
                 # For external URLs, use the href URL and ignore the text
                 # The URL will be highlighted by the URL detection later
                 self.text[-1] += self.current_link_href
@@ -1652,6 +1667,23 @@ class HTMLtoLines(HTMLParser):
         # Default to 100 columns if no width specified
         if width == 0:
             width = 100
+        
+        # In dump mode, return plain text without any formatting
+        if self.dump_mode:
+            # Simply return the text content without any special processing
+            for i in self.text:
+                if i:  # Include all lines, even empty ones for paragraph breaks
+                    # Basic text wrapping for long lines
+                    if len(i) <= width:
+                        text.append(i)
+                    else:
+                        # Simple word wrapping
+                        wrapped = textwrap.wrap(i, width, break_long_words=False, break_on_hyphens=True)
+                        text.extend(wrapped)
+                else:
+                    # Preserve empty lines for paragraph breaks
+                    text.append("")
+            return text, [], []  # Return empty lists for images and image alts in dump mode
         
         # Apply block coalescence to improve code detection consistency
         self.apply_block_coalescence()
@@ -5723,7 +5755,7 @@ def main():
         for i in epub.contents:
             content = epub.file.open(i).read()
             content = content.decode("utf-8")
-            parser = HTMLtoLines()
+            parser = HTMLtoLines(dump_mode=True)
             try:
                 parser.feed(content)
                 parser.close()
@@ -5732,7 +5764,7 @@ def main():
             src_lines, imgs, img_alts = parser.get_lines()
             # sys.stdout.reconfigure(encoding="utf-8")  # Python>=3.7
             for j in src_lines:
-                sys.stdout.buffer.write((j+"\n\n").encode("utf-8"))
+                sys.stdout.buffer.write((j+"\n").encode("utf-8"))
         sys.exit()
 
     else:
