@@ -1895,8 +1895,8 @@ def find_urls_in_text(text):
     
     # Whitelist-based URL pattern: protocol + domain + optional port + optional path + optional query string
     # Includes query strings but excludes fragments
-    # Path and query must end with alphanumeric or specific safe characters, not punctuation
-    url_pattern = r'https?://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/[a-zA-Z0-9._/-]*)?(?:\?[a-zA-Z0-9._/\-~&=+%]*[a-zA-Z0-9_/\-~&=+%])?'
+    # Ensures URLs don't end with punctuation marks
+    url_pattern = r'https?://[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]+)?(?:/[a-zA-Z0-9._/\-~]*[a-zA-Z0-9/\-~])?(?:\?[a-zA-Z0-9._/\-~&=+%]*[a-zA-Z0-9/\-~&=+%])?'
     
     urls = []
     for match in re.finditer(url_pattern, text):
