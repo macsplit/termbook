@@ -39,7 +39,7 @@ Key Binding:
 
 
 __version__ = "1.1.0"
-__build_time__ = "2025-08-24 18:26:33"
+__build_time__ = "2025-08-25 12:12:29"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -1339,17 +1339,18 @@ class HTMLtoLines(HTMLParser):
             # Detect language (use original text for detection)
             lexer = self.detect_language(code_text, hint_lang)
             
-            # If no lexer detected, use bright white fallback
+            # If no lexer detected, use theme-appropriate fallback
             if lexer is None:
                 lines = organized_text.split('\n')
                 result = []
                 for line in lines:
                     if line.strip():  # Only color non-empty lines
-                        white_colors = [(255, 255, 255)] * len(line)
-                        result.append((line, white_colors))
+                        # Use dual color format: (dark_theme_color, light_theme_color)
+                        dual_colors = [((255, 255, 255), (50, 50, 50))] * len(line)
+                        result.append((line, dual_colors))
                     else:
                         result.append((line, []))
-                return result if result else [(code_text, [(255, 255, 255)] * len(code_text))]
+                return result if result else [(code_text, [((255, 255, 255), (50, 50, 50))] * len(code_text))]
             
             # Get tokens from organized text
             tokens = list(lexer.get_tokens(organized_text))
@@ -1360,7 +1361,7 @@ class HTMLtoLines(HTMLParser):
             current_colors = []
             
             for token_type, token_value in tokens:
-                # Map token types to colors
+                # Map token types to colors (returns tuple of (dark_color, light_color))
                 color = self.get_token_color(token_type)
                 
                 # Handle line breaks
@@ -1395,57 +1396,60 @@ class HTMLtoLines(HTMLParser):
             return result if result else [(code_text, [])]
             
         except Exception:
-            # Fall back to bright white text if highlighting fails - better than grey
+            # Fall back to theme-appropriate colors if highlighting fails
             lines = code_text.split('\n')
             result = []
             for line in lines:
                 if line.strip():  # Only color non-empty lines
-                    white_colors = [(255, 255, 255)] * len(line)
-                    result.append((line, white_colors))
+                    # Use dual color format: (dark_theme_color, light_theme_color)
+                    dual_colors = [((255, 255, 255), (50, 50, 50))] * len(line)
+                    result.append((line, dual_colors))
                 else:
                     result.append((line, []))
-            return result if result else [(code_text, [(255, 255, 255)] * len(code_text))]
+            return result if result else [(code_text, [((255, 255, 255), (50, 50, 50))] * len(code_text))]
     
     def get_token_color(self, token_type):
         """Map Pygments token types to terminal colors."""
-        # Bright, clean color scheme - no backgrounds, just bright foreground colors
-        token_colors = {
-            'Keyword': (0, 150, 255),           # Bright blue for keywords (import, export, etc.)
-            'Keyword.Constant': (0, 150, 255),
-            'Keyword.Declaration': (0, 150, 255), 
-            'Keyword.Namespace': (0, 150, 255),
-            'Keyword.Pseudo': (0, 150, 255),
-            'Keyword.Reserved': (0, 150, 255),
-            'Keyword.Type': (100, 200, 255),    # Lighter blue for types
+        # We'll store both light and dark theme colors
+        # Format: (dark_theme_color, light_theme_color)
+        # For light theme, we use darker, more saturated colors for better contrast
+        token_colors_dual = {
+            'Keyword': ((0, 150, 255), (0, 50, 200)),           # Blue: bright for dark, dark for light
+            'Keyword.Constant': ((0, 150, 255), (0, 50, 200)),
+            'Keyword.Declaration': ((0, 150, 255), (0, 50, 200)), 
+            'Keyword.Namespace': ((0, 150, 255), (0, 50, 200)),
+            'Keyword.Pseudo': ((0, 150, 255), (0, 50, 200)),
+            'Keyword.Reserved': ((0, 150, 255), (0, 50, 200)),
+            'Keyword.Type': ((100, 200, 255), (0, 100, 180)),    # Type keywords
             
-            'Name.Class': (255, 255, 0),        # Bright yellow for classes
-            'Name.Function': (255, 255, 0),     # Bright yellow for functions
-            'Name.Builtin': (255, 100, 255),    # Bright magenta for builtins
-            'Name.Exception': (255, 100, 0),    # Bright orange for exceptions
+            'Name.Class': ((255, 255, 0), (180, 140, 0)),        # Yellow: bright for dark, dark gold for light
+            'Name.Function': ((255, 255, 0), (180, 140, 0)),     # Functions
+            'Name.Builtin': ((255, 100, 255), (150, 0, 150)),    # Magenta: bright for dark, dark purple for light
+            'Name.Exception': ((255, 100, 0), (200, 50, 0)),     # Orange: bright for dark, dark orange for light
             
-            'Literal.String': (0, 255, 0),      # Bright green for strings
-            'Literal.String.Double': (0, 255, 0),
-            'Literal.String.Single': (0, 255, 0),
-            'Literal.Number': (255, 165, 0),    # Bright orange for numbers
-            'Literal.Number.Integer': (255, 165, 0),
-            'Literal.Number.Float': (255, 165, 0),
+            'Literal.String': ((0, 255, 0), (0, 140, 0)),        # Green: bright for dark, dark green for light
+            'Literal.String.Double': ((0, 255, 0), (0, 140, 0)),
+            'Literal.String.Single': ((0, 255, 0), (0, 140, 0)),
+            'Literal.Number': ((255, 165, 0), (180, 90, 0)),     # Orange numbers
+            'Literal.Number.Integer': ((255, 165, 0), (180, 90, 0)),
+            'Literal.Number.Float': ((255, 165, 0), (180, 90, 0)),
             
-            'Comment': (128, 128, 128),         # Medium gray for comments
-            'Comment.Single': (128, 128, 128),
-            'Comment.Multiline': (128, 128, 128),
-            'Comment.Preproc': (255, 255, 255),  # Bright white for XML declarations and DTD
+            'Comment': ((128, 128, 128), (100, 100, 100)),         # Gray for comments
+            'Comment.Single': ((128, 128, 128), (100, 100, 100)),
+            'Comment.Multiline': ((128, 128, 128), (100, 100, 100)),
+            'Comment.Preproc': ((255, 255, 255), (50, 50, 50)),  # White/dark for preprocessor
             
-            'Operator': (255, 255, 255),        # White for operators
-            'Punctuation': (255, 255, 255),     # White for punctuation
+            'Operator': ((255, 255, 255), (50, 50, 50)),        # White/dark for operators
+            'Punctuation': ((255, 255, 255), (50, 50, 50)),     # White/dark for punctuation
             
             # XML-specific token types
-            'Name.Tag': (0, 150, 255),           # Blue for XML tags
-            'Name.Attribute': (255, 255, 0),     # Yellow for XML attributes  
-            'Literal.String.Doc': (0, 255, 0),   # Green for XML content
-            'Generic.Emph': (255, 255, 255),     # White for emphasized content
-            'Generic.Strong': (255, 255, 255),   # White for strong content
-            'Text': (255, 255, 255),             # White for plain text
-            'Text.Whitespace': (255, 255, 255),  # White for whitespace
+            'Name.Tag': ((0, 150, 255), (0, 50, 200)),           # Blue for XML tags
+            'Name.Attribute': ((255, 255, 0), (180, 140, 0)),     # Yellow for XML attributes  
+            'Literal.String.Doc': ((0, 255, 0), (0, 140, 0)),   # Green for XML content
+            'Generic.Emph': ((255, 255, 255), (50, 50, 50)),     # White/dark for emphasized
+            'Generic.Strong': ((255, 255, 255), (50, 50, 50)),   # White/dark for strong
+            'Text': ((255, 255, 255), (50, 50, 50)),             # White/dark for plain text
+            'Text.Whitespace': ((255, 255, 255), (50, 50, 50)),  # White/dark for whitespace
         }
         
         # Convert token type to string and find best match
@@ -1456,16 +1460,16 @@ class HTMLtoLines(HTMLParser):
             token_str = token_str[6:]
         
         # Try exact match first
-        if token_str in token_colors:
-            return token_colors[token_str]
+        if token_str in token_colors_dual:
+            return token_colors_dual[token_str]
         
         # Try partial matches (e.g., "Name.Function.Magic" -> "Name.Function")
-        for pattern, color in token_colors.items():
+        for pattern, color in token_colors_dual.items():
             if token_str.startswith(pattern):
                 return color
         
-        # Default to white for unknown tokens
-        return (255, 255, 255)
+        # Default to white for dark theme, dark gray for light theme
+        return ((255, 255, 255), (50, 50, 50))
 
     def wrap_text_preserve_urls(self, text, width):
         """Wrap text while preserving URLs on separate lines when needed."""
@@ -3473,17 +3477,28 @@ def get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True):
     
     return 0, False  # Default pair
 
-def get_syntax_color_pair(color):
+def get_syntax_color_pair(color, bg_color=None):
     """Get a pre-allocated color pair for syntax highlighting."""
     if not COLORSUPPORT:
         return 0
     
-    # Try to find exact match in pre-allocated pairs
-    if color in _SYNTAX_COLOR_PAIRS:
-        return _SYNTAX_COLOR_PAIRS[color]
+    # If no background specified, use black
+    if bg_color is None:
+        bg_color = (0, 0, 0)
     
-    # Fall back to regular color pair system with black background
-    return get_color_pair(color, (0, 0, 0))
+    # Create a cache key that includes both fg and bg
+    cache_key = (tuple(color) if isinstance(color, (list, tuple)) else color, 
+                 tuple(bg_color) if isinstance(bg_color, (list, tuple)) else bg_color)
+    
+    # Try to find exact match in pre-allocated pairs
+    if cache_key in _SYNTAX_COLOR_PAIRS:
+        return _SYNTAX_COLOR_PAIRS[cache_key]
+    
+    # Fall back to regular color pair system with specified background
+    pair = get_color_pair(color, bg_color)
+    if pair > 0:
+        _SYNTAX_COLOR_PAIRS[cache_key] = pair
+    return pair
 
 def get_color_pair(fg_color, bg_color=None):
     """Legacy interface that uses the new smart color system."""
@@ -4095,20 +4110,31 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 # Syntax highlighted line with color information
                 content = line[10:]  # Remove "SYNTAX_HL:" prefix
                 
-                # First, fill the entire line with dark background  
+                # Determine current theme
+                current_bg_pair = curses.pair_number(pad.getbkgd())
+                is_light_theme = current_bg_pair == 3  # Light theme is color pair 3
+                
+                # First, fill the entire line with appropriate background based on theme
                 if COLORSUPPORT:
-                    # Use the same color system as syntax highlighting for consistency
-                    # Try both color pair systems to ensure background gets applied
-                    dark_bg_pair = get_color_pair((200, 200, 200), (32, 32, 32))  # Light gray text on dark gray background
-                    if dark_bg_pair <= 0:
-                        # Fallback: try the syntax color system
-                        dark_bg_pair = get_syntax_color_pair((200, 200, 200))
+                    if is_light_theme:
+                        # Light theme: use a light gray background for code blocks
+                        code_bg_pair = get_color_pair((32, 32, 32), (240, 240, 240))  # Dark text on light gray background
+                    else:
+                        # Dark/default theme: use dark background as before
+                        code_bg_pair = get_color_pair((200, 200, 200), (32, 32, 32))  # Light gray text on dark gray background
                     
-                    if dark_bg_pair > 0:
-                        # Fill from text start to right edge of terminal with dark background
+                    if code_bg_pair <= 0:
+                        # Fallback: try the syntax color system with appropriate background
+                        if is_light_theme:
+                            code_bg_pair = get_syntax_color_pair((50, 50, 50), (240, 240, 240))
+                        else:
+                            code_bg_pair = get_syntax_color_pair((200, 200, 200), (32, 32, 32))
+                    
+                    if code_bg_pair > 0:
+                        # Fill from text start to right edge of terminal with appropriate background
                         for bg_col in range(cols - x):
                             try:
-                                pad.addstr(n, bg_col, " ", curses.color_pair(dark_bg_pair))
+                                pad.addstr(n, bg_col, " ", curses.color_pair(code_bg_pair))
                             except:
                                 pass  # Ignore if we can't write at this position
                 
@@ -4129,11 +4155,29 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                 break
                                 
                             if char_idx < len(colors) and colors[char_idx]:
-                                # Get color tuple (r, g, b)
-                                color_tuple = colors[char_idx]
-                                if isinstance(color_tuple, (tuple, list)) and len(color_tuple) == 3:
-                                    # Get or create color pair for this syntax color
-                                    color_pair = get_syntax_color_pair(color_tuple)
+                                # Get color tuple - could be dual format ((dark_rgb), (light_rgb)) or single (r,g,b)
+                                color_data = colors[char_idx]
+                                
+                                # Check if it's dual color format
+                                if isinstance(color_data, (tuple, list)) and len(color_data) == 2:
+                                    # Dual format: select based on theme
+                                    dark_color, light_color = color_data
+                                    color_tuple = light_color if is_light_theme else dark_color
+                                elif isinstance(color_data, (tuple, list)) and len(color_data) == 3:
+                                    # Single format (legacy): use as-is
+                                    color_tuple = color_data
+                                else:
+                                    color_tuple = None
+                                
+                                if color_tuple and isinstance(color_tuple, (tuple, list)) and len(color_tuple) == 3:
+                                    # Get or create color pair for this syntax color with appropriate background
+                                    # Use light gray background for light theme, dark gray for others
+                                    if is_light_theme:
+                                        syntax_bg_color = (240, 240, 240)  # Light gray background for light theme
+                                    else:
+                                        syntax_bg_color = (32, 32, 32)  # Dark gray background for dark themes
+                                    
+                                    color_pair = get_syntax_color_pair(color_tuple, syntax_bg_color)
                                     if color_pair > 0:
                                         try:
                                             pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
@@ -4219,9 +4263,14 @@ def reader(stdscr, ebook, index, width, y, pctg):
                             end_pos = match.end()
                             annotation_text = match.group()
                             
-                            # Apply yellow text on normal dark background to the annotation
+                            # Apply yellow text on appropriate background for the annotation
                             if COLORSUPPORT:
-                                annotation_color_pair = get_syntax_color_pair((255, 255, 0))  # Yellow text
+                                if is_light_theme:
+                                    # Dark yellow on light background for light theme
+                                    annotation_color_pair = get_syntax_color_pair((180, 140, 0), (240, 240, 240))
+                                else:
+                                    # Bright yellow on dark background for dark themes
+                                    annotation_color_pair = get_syntax_color_pair((255, 255, 0), (32, 32, 32))
                                 if annotation_color_pair > 0:
                                     # Overwrite the annotation with yellow color - but ONLY if it's within bounds
                                     for i, char in enumerate(annotation_text):
