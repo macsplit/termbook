@@ -39,7 +39,7 @@ Key Binding:
 
 
 __version__ = "1.1.1"
-__build_time__ = "2025-08-25 20:20:54"
+__build_time__ = "2025-08-25 21:03:21"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -3629,16 +3629,16 @@ def init_smart_color_palette():
     
     palette = []
     
-    # Add full 6x6x6 RGB cube for better color matching
-    # This matches the 216-color cube in the 256-color palette (indices 16-231)
-    # Using the actual xterm-256 color level values for accurate mapping
-    rgb_levels = [0, 95, 135, 175, 215, 255]
-    for r in range(6):
-        for g in range(6):
-            for b in range(6):
-                red = rgb_levels[r]
-                green = rgb_levels[g]
-                blue = rgb_levels[b]
+    # Use a finer 8x8x8 RGB cube for better color matching
+    # This gives us 512 color gradations instead of 216
+    # More gradations = less "hickeldy pickley" color jumps
+    for r in range(8):
+        for g in range(8):
+            for b in range(8):
+                # Map 0-7 to 0-255 with better distribution
+                red = int(r * 255 / 7)
+                green = int(g * 255 / 7)
+                blue = int(b * 255 / 7)
                 palette.append((red, green, blue))
     
     # Add 24 grayscale colors (matching indices 232-255)
@@ -3680,9 +3680,9 @@ def find_closest_palette_color(target_rgb):
     best_match = _color_palette[0]
     best_distance = float('inf')
     
-    # Set a reasonable threshold - if no palette color is within this distance,
-    # we'll return the original color to avoid bad matches
-    max_acceptable_distance = 1500  # Roughly 39 units per channel squared - more selective
+    # Set a more lenient threshold - allow closer palette matches
+    # to avoid returning original colors that won't work with curses
+    max_acceptable_distance = 800  # More lenient to use palette colors more often
     
     for palette_rgb in _color_palette:
         # Use standard Euclidean distance for more consistent results
@@ -3707,18 +3707,18 @@ def rgb_to_color_index(r, g, b):
     try:
         r, g, b = max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
         
-        # More strict grayscale detection - only truly gray colors
-        # Increased threshold from 12 to 20 to be less aggressive
+        # Much stricter grayscale detection - only perfectly gray colors
+        # Increased threshold to 35 to preserve subtle colors
         max_diff = max(abs(r - g), abs(g - b), abs(r - b))
         
-        # Only consider it grayscale if very close in values AND low saturation
-        # This preserves more colored pixels
-        if max_diff < 20:
+        # Only consider it grayscale if VERY close in values AND low saturation
+        # This preserves more colored pixels and prevents "hickeldy pickley" colors
+        if max_diff < 35:
             # Check saturation - if there's any color bias, preserve it
             avg = (r + g + b) / 3
             color_bias = max(abs(r - avg), abs(g - avg), abs(b - avg))
             
-            if color_bias < 10:  # Only truly neutral colors become grayscale
+            if color_bias < 18:  # Only truly neutral colors become grayscale
                 gray = int((r + g + b) / 3)
                 if gray < 8:
                     return 0  # Black
@@ -3729,12 +3729,18 @@ def rgb_to_color_index(r, g, b):
                     level = min(23, max(0, (gray - 8) * 23 // 240))
                     return 232 + level
         
-        # For colored pixels, use the full 6x6x6 color cube more effectively
-        # Improved quantization to preserve more color variation
-        r_level = min(5, int(r * 5.99 / 256))  # Better distribution
-        g_level = min(5, int(g * 5.99 / 256))
-        b_level = min(5, int(b * 5.99 / 256))
-        return 16 + r_level * 36 + g_level * 6 + b_level
+        # For colored pixels, use better quantization to match our 8x8x8 palette
+        # This provides smoother color gradations
+        r_level = min(7, int(r * 8 / 256))
+        g_level = min(7, int(g * 8 / 256))
+        b_level = min(7, int(b * 8 / 256))
+        # Map to appropriate color index in 256-color space
+        # We still need to map to the standard 6x6x6 cube for terminal compatibility
+        # So convert our 8-level to nearest 6-level
+        r_level_6 = min(5, int(r_level * 6 / 8))
+        g_level_6 = min(5, int(g_level * 6 / 8))
+        b_level_6 = min(5, int(b_level * 6 / 8))
+        return 16 + r_level_6 * 36 + g_level_6 * 6 + b_level_6
     except:
         return 7  # Default white
 
@@ -3853,9 +3859,30 @@ def render_image_curses(pad, img, start_y, start_x, max_width, max_height):
             block_idx = (pixels[0] << 3) | (pixels[1] << 2) | (pixels[2] << 1) | pixels[3]
             char = blocks[block_idx]
             
-            # Use dominant color for foreground
-            avg_color = tuple(sum(c[i] for c in colors) // 4 for i in range(3))
-            color_pair = get_color_pair(avg_color)
+            # Use most vibrant/saturated color instead of average to preserve color richness
+            # This prevents muddy averaged colors
+            best_color = colors[0]
+            max_saturation = 0
+            for color in colors:
+                r, g, b = color
+                # Calculate saturation (how far from gray)
+                avg = (r + g + b) / 3
+                saturation = abs(r - avg) + abs(g - avg) + abs(b - avg)
+                if saturation > max_saturation:
+                    max_saturation = saturation
+                    best_color = color
+            
+            # If all colors are very similar (low variance), then average them
+            # Otherwise use the most saturated color
+            color_variance = sum(abs(colors[i][j] - colors[0][j]) 
+                                for i in range(1, len(colors)) 
+                                for j in range(3))
+            
+            if color_variance < 30:  # All colors very similar
+                avg_color = tuple(sum(c[i] for c in colors) // 4 for i in range(3))
+                color_pair = get_color_pair(avg_color)
+            else:
+                color_pair = get_color_pair(best_color)
             
             try:
                 if color_pair and COLORSUPPORT:
