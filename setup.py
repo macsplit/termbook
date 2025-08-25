@@ -28,13 +28,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="termbook",
-    version="1.1.0",
+    version="1.1.1",
     author="Lee Hanken",
     author_email="",
     description="A terminal-based EPUB reader optimized for programming books",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/leehanken/termbook",
+    url="https://github.com/macsplit/termbook",
     py_modules=["termbook"],
     classifiers=[
         "Programming Language :: Python :: 3",

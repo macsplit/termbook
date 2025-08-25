@@ -38,12 +38,12 @@ Key Binding:
 """
 
 
-__version__ = "1.1.0"
-__build_time__ = "2025-08-25 12:33:34"
+__version__ = "1.1.1"
+__build_time__ = "2025-08-25 20:20:54"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
-__url__ = "https://github.com/leehanken/termbook"
+__url__ = "https://github.com/macsplit/termbook"
 
 
 import curses
@@ -1103,8 +1103,24 @@ class HTMLtoLines(HTMLParser):
             except ClassNotFound:
                 pass
         
+        # TypeScript heuristics (check before JavaScript since TS is superset)
+        elif ('interface ' in code_lower or 'type ' in code_lower or 
+              ': string' in code_lower or ': number' in code_lower or ': boolean' in code_lower or
+              'public ' in code_lower or 'private ' in code_lower or 'protected ' in code_lower or
+              ': void' in code_lower or 'readonly ' in code_lower or
+              '?' in code_text or # Optional properties like email?: string
+              ('class ' in code_lower and ('public' in code_lower or 'private' in code_lower))):
+            try:
+                return get_lexer_by_name('typescript')
+            except ClassNotFound:
+                # Fall back to JavaScript if TypeScript lexer not available
+                try:
+                    return get_lexer_by_name('javascript')
+                except ClassNotFound:
+                    pass
+        
         # JavaScript heuristics
-        elif ('function ' in code_lower or 'console.log' in code_lower or 'var ' in code_lower or 'let ' in code_lower):
+        elif ('function ' in code_lower or 'console.log' in code_lower or 'var ' in code_lower or 'let ' in code_lower or 'const ' in code_lower):
             try:
                 return get_lexer_by_name('javascript')
             except ClassNotFound:
@@ -1454,8 +1470,10 @@ class HTMLtoLines(HTMLParser):
             'Comment.Multiline': ((128, 128, 128), (100, 100, 100)),
             'Comment.Preproc': ((255, 255, 255), (50, 50, 50)),  # White/dark for preprocessor
             
-            'Operator': ((255, 255, 255), (50, 50, 50)),        # White/dark for operators
-            'Punctuation': ((255, 255, 255), (50, 50, 50)),     # White/dark for punctuation
+            'Operator': ((255, 100, 255), (150, 0, 150)),       # Magenta for operators like =, +, -
+            'Operator.Word': ((255, 100, 255), (150, 0, 150)),   # instanceof, typeof, etc.
+            'Punctuation': ((255, 255, 0), (180, 140, 0)),      # Yellow for punctuation like {}, (), ;
+            'Punctuation.Bracket': ((255, 255, 0), (180, 140, 0)), # Brackets specifically
             
             # XML-specific token types
             'Name.Tag': ((0, 150, 255), (0, 50, 200)),           # Blue for XML tags
@@ -1465,6 +1483,25 @@ class HTMLtoLines(HTMLParser):
             'Generic.Strong': ((255, 255, 255), (50, 50, 50)),   # White/dark for strong
             'Text': ((255, 255, 255), (50, 50, 50)),             # White/dark for plain text
             'Text.Whitespace': ((255, 255, 255), (50, 50, 50)),  # White/dark for whitespace
+            
+            # TypeScript/JavaScript-specific tokens
+            'Name.Other': ((0, 255, 255), (0, 150, 150)),        # Variable names and identifiers (cyan)
+            'Name.Variable': ((0, 255, 255), (0, 150, 150)),     # Variable names (cyan)
+            'Name.Property': ((255, 255, 0), (180, 140, 0)),     # Object properties (yellow)
+            'Name.Constant': ((255, 165, 0), (180, 90, 0)),      # Constants
+            'Name.Builtin.Pseudo': ((255, 100, 255), (150, 0, 150)), # this, super, etc.
+            'Keyword.Declaration': ((0, 150, 255), (0, 50, 200)), # let, const, var, interface
+            'Keyword.Reserved': ((0, 150, 255), (0, 50, 200)),   # Reserved keywords
+            'Operator.Word': ((255, 100, 255), (150, 0, 150)),   # instanceof, typeof, etc.
+            'Name.Decorator': ((255, 100, 255), (150, 0, 150)),  # Decorators (@override, etc.)
+            'Literal.String.Backtick': ((0, 255, 0), (0, 140, 0)), # Template literals
+            'Literal.String.Interpol': ((255, 255, 0), (180, 140, 0)), # String interpolation
+            'Literal.Number.Bin': ((255, 165, 0), (180, 90, 0)), # Binary numbers
+            'Literal.Number.Hex': ((255, 165, 0), (180, 90, 0)), # Hexadecimal numbers
+            'Literal.Number.Oct': ((255, 165, 0), (180, 90, 0)), # Octal numbers
+            
+            # Special tokens
+            'Error': ((255, 0, 0), (200, 0, 0)),                 # Error tokens (bright red)
         }
         
         # Convert token type to string and find best match
@@ -1788,11 +1825,11 @@ def show_initial_help_message(stdscr, rows, cols):
         if COLORSUPPORT:
             try:
                 if is_light_scheme:
-                    # Light scheme: light text on dark background
-                    hint_pair = get_color_pair((255, 255, 255), (64, 64, 64))  # White on dark gray
+                    # Light scheme: white text on darker background for better contrast
+                    hint_pair = get_color_pair((255, 255, 255), (100, 100, 100))  # White on dark gray
                 else:
-                    # Dark scheme: dark text on light background  
-                    hint_pair = get_color_pair((0, 0, 0), (200, 200, 200))  # Black on light gray
+                    # Dark scheme: light text on darker background  
+                    hint_pair = get_color_pair((255, 255, 255), (64, 64, 64))  # White on dark gray
                     
                 if hint_pair > 0:
                     stdscr.addstr(rows - 1, start_col, message, curses.color_pair(hint_pair))
@@ -1838,22 +1875,12 @@ def show_persistent_hint(stdscr, rows, cols, has_urls, has_images):
         
         # Show hint with appropriate colors
         if COLORSUPPORT:
-            try:
-                if is_light_scheme:
-                    # Light scheme: light text on dark background
-                    hint_pair = get_color_pair((255, 255, 255), (64, 64, 64))  # White on dark gray
-                else:
-                    # Dark scheme: dark text on light background  
-                    hint_pair = get_color_pair((0, 0, 0), (200, 200, 200))  # Black on light gray
-                    
-                if hint_pair > 0:
-                    stdscr.addstr(rows - 1, start_col, message, curses.color_pair(hint_pair))
-                else:
-                    # Fallback to reverse video
-                    stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
-            except:
-                # Fallback to reverse video
-                stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
+            if is_light_scheme:
+                # Light scheme: use color pair 3 (designed for light backgrounds)
+                stdscr.addstr(rows - 1, start_col, message, curses.color_pair(3))
+            else:
+                # Dark scheme: use default color pair 1 or 2
+                stdscr.addstr(rows - 1, start_col, message, curses.color_pair(2))
         else:
             # No color support, use reverse video
             stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
@@ -1926,38 +1953,59 @@ def get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, img_line_nu
     figure_number = None
     base_label = None
     
-    # First try to get figure number from alt text
-    if img_idx < len(img_alts) and img_alts[img_idx]:
-        alt_text = img_alts[img_idx]
-        figure_number = extract_figure_number(alt_text)
-        base_label = alt_text
-    
-    # If no figure number yet, search nearby lines for captions
-    if not figure_number and img_line_num is not None:
-        # Search a few lines before and after the image for captions
-        search_range = 3  # Reduced range to be more specific to each image
-        start = max(0, img_line_num - search_range)
-        end = min(len(src_lines), img_line_num + search_range)
+    # First search nearby lines for HTML captions (more reliable than alt text)
+    if img_line_num is not None:
+        # Search a larger range, especially after the image where captions often appear
+        search_before = 10  # Check 10 lines before image  
+        search_after = 20   # Check 20 lines after image (captions often come after)
+        start = max(0, img_line_num - search_before)
+        end = min(len(src_lines), img_line_num + search_after)
         
-        # Look for captions first (more reliable)
+        # Look for captions first (more reliable) 
         for i in range(start, end):
             if i < len(src_lines):
                 line = src_lines[i]
+                
+                # DEBUG: Log search process
+                try:
+                    with open('/tmp/termbook_debug.log', 'a') as f:
+                        if i == img_line_num:
+                            f.write(f"  Searching around IMG line {i}: '{line[:60]}...'\n")
+                        elif 'Figure 1.7' in line:
+                            f.write(f"  *** Found 'Figure 1.7' at line {i}: '{line[:60]}...'\n")
+                except:
+                    pass
+                
+                # Handle explicit CAPTION: prefix
                 if line.startswith("CAPTION:"):
                     caption_text = line[8:]  # Remove "CAPTION:" prefix
                     figure_number = extract_figure_number(caption_text)
                     if figure_number:
                         base_label = caption_text.strip()
                         break
+                
+                # Also check for HTML figure captions (h5, h6, figcaption, etc.)
+                import re
+                if re.search(r'<(?:h[456]|figcaption)[^>]*>', line, re.IGNORECASE):
+                    # Strip HTML tags to get clean text
+                    clean_text = re.sub(r'<[^>]+>', ' ', line).strip()
+                    figure_number = extract_figure_number(clean_text)
+                    if figure_number:
+                        base_label = clean_text
+                        break
         
         # If still no figure number, check regular lines but prioritize lines closer to the image
         if not figure_number:
-            # Check lines in order of proximity to image
+            # Check lines in order of proximity to image, preferring lines after the image
             distances = []
             for i in range(start, end):
                 if i < len(src_lines):
-                    distances.append((abs(i - img_line_num), i))
-            distances.sort()  # Sort by distance from image
+                    distance = abs(i - img_line_num)
+                    # Add slight preference for lines after the image (captions usually come after)
+                    if i > img_line_num:
+                        distance -= 0.5  # Make "after" lines slightly closer
+                    distances.append((distance, i))
+            distances.sort()  # Sort by distance from image (with after-image preference)
             
             for _, i in distances:
                 line = src_lines[i]
@@ -1967,7 +2015,14 @@ def get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, img_line_nu
                         base_label = line.strip()
                         break
     
-    # Additional check: try to extract figure number from filename as last resort
+    # If still no figure number, try alt text as fallback
+    if not figure_number and img_idx < len(img_alts) and img_alts[img_idx]:
+        alt_text = img_alts[img_idx]
+        figure_number = extract_figure_number(alt_text)
+        if not base_label:  # Only use alt text if we don't have a better label
+            base_label = alt_text
+    
+    # Final fallback: try to extract figure number from filename
     if not figure_number:
         filename = os.path.basename(img_path)
         figure_number = extract_figure_number(filename)
@@ -1978,6 +2033,14 @@ def get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, img_line_nu
     if os.getenv('TERMBOOK_DEBUG_FIGURES'):
         import sys
         print(f"DEBUG: Image {img_idx} ({os.path.basename(img_path)}) -> Figure: '{figure_number}' from '{base_label}' at line {img_line_num}", file=sys.stderr)
+        if img_line_num is not None and img_line_num < len(src_lines):
+            print(f'DEBUG: Context around line {img_line_num}:', file=sys.stderr)
+            start = max(0, img_line_num - 2)
+            end = min(len(src_lines), img_line_num + 8)
+            for i in range(start, end):
+                marker = '>>> ' if i == img_line_num else '    '
+                line_content = src_lines[i][:80] + '...' if len(src_lines[i]) > 80 else src_lines[i]
+                print(f'{marker}{i:3}: {line_content}', file=sys.stderr)
     
     # Fallback to filename
     if not base_label:
@@ -1994,18 +2057,26 @@ def get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, img_line_nu
         
         if clean_label and clean_label != base_label and len(clean_label.strip()) > 3:
             # Use figure number + shortened description
-            short_desc = clean_label.strip()[:20]  # Limit description length
-            if len(clean_label.strip()) > 20:
+            short_desc = clean_label.strip()[:40]  # Increased limit for better context
+            if len(clean_label.strip()) > 40:
                 short_desc += "..."
-            return f"Fig {figure_number}: {short_desc}"
+            return f"Figure {figure_number}: {short_desc}"
         else:
             # Just figure number
             return f"Figure {figure_number}"
     
     # No figure number found, use original label logic
     if base_label and base_label != os.path.basename(img_path):
-        # Use alt text, truncated if needed
-        return base_label[:30] + ("..." if len(base_label) > 30 else "")
+        # Use alt text, with more generous truncation
+        if len(base_label) > 60:
+            # Try to preserve important parts like figure numbers at the end
+            if re.search(r'(?:Figure|Fig\.?|Table|Tab\.?)\s+\d+(?:[.\-]\d+)*', base_label, re.IGNORECASE):
+                # If it contains figure/table numbers, be more generous with length
+                return base_label[:80] + ("..." if len(base_label) > 80 else "")
+            else:
+                return base_label[:60] + ("..." if len(base_label) > 60 else "")
+        else:
+            return base_label
     else:
         # Use filename
         return os.path.basename(img_path)
@@ -2014,6 +2085,13 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
     """Get images that are visible or overlapping with the current viewport.
     Uses precise image line mapping if available."""
     import re
+    
+    # DEBUG: Log viewport parameters
+    try:
+        with open('/tmp/termbook_debug.log', 'a') as f:
+            f.write(f"get_visible_images called with y={y}, rows={rows}, total_lines={len(src_lines)}\n")
+    except:
+        pass
     
     if not imgs:
         return []
@@ -2024,6 +2102,13 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
     # Define viewport with small overlap 
     viewport_start = max(0, y - 2)
     viewport_end = min(len(src_lines), y + rows + 2)
+    
+    # DEBUG: Log viewport range
+    try:
+        with open('/tmp/termbook_debug.log', 'a') as f:
+            f.write(f"  Viewport range: {viewport_start} to {viewport_end}\n")
+    except:
+        pass
     
     # Use precise image line mapping if available
     if image_line_map and len(image_line_map) == len(src_lines):
@@ -2049,6 +2134,14 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
                 if img_idx < len(imgs) and img_idx not in seen_indices:
                     visible_images.append((imgs[img_idx], line_num, img_idx))
                     seen_indices.add(img_idx)
+                    # DEBUG: Log found image
+                    try:
+                        with open('/tmp/termbook_debug.log', 'a') as f:
+                            f.write(f"  Found image: {imgs[img_idx]} at line {line_num} (idx {img_idx})\n")
+                            f.write(f"    Line content: '{line[:100]}...'\n")
+                            f.write(f"    Regex match: '{img_match.group()}'\n")
+                    except:
+                        pass
             
             # Check for IMG_LINE: markers (rendered images)
             elif line.startswith("IMG_LINE:"):
@@ -2072,12 +2165,60 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
     
     return visible_images
 
+def open_image_in_system_viewer(ebook, chpath, img_path):
+    """
+    Extract image from EPUB and open it in the system's default image viewer
+    
+    Args:
+        ebook: The EPUB file object
+        chpath: Chapter path for resolving relative paths
+        img_path: Path to the image within the EPUB
+        
+    Returns:
+        bool: True if successful, False if failed
+    """
+    try:
+        # Get correct image path using dots_path
+        imgsrc = dots_path(chpath, img_path)
+        
+        # Extract and save the image to temp file
+        img_data = ebook.file.read(imgsrc)
+        
+        # Determine file extension
+        ext = os.path.splitext(img_path)[1] or '.png'
+        
+        # Create temp file
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(img_data)
+            tmp_path = tmp.name
+        
+        # Open with system default viewer
+        if os.name == 'posix':
+            subprocess.run(['xdg-open', tmp_path], 
+                         stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL,
+                         check=False)
+        elif os.name == 'nt':
+            subprocess.run(['start', tmp_path], shell=True, 
+                         stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL,
+                         check=False)
+        else:
+            # Fallback for other platforms (macOS, etc.)
+            subprocess.run(['open', tmp_path], 
+                         stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL,
+                         check=False)
+        return True
+    except Exception as e:
+        return False
+
 def loadstate():
     global STATE, STATEFILE, BOOKMARKSFILE
     if os.getenv("HOME") is not None:
         STATEFILE = os.path.join(os.getenv("HOME"), ".termbook")
         if os.path.isdir(os.path.join(os.getenv("HOME"), ".config")):
-            configdir = os.path.join(os.getenv("HOME"), ".config", "epr")
+            configdir = os.path.join(os.getenv("HOME"), ".config", "termbook")
             os.makedirs(configdir, exist_ok=True)
             if os.path.isfile(STATEFILE):
                 if os.path.isfile(os.path.join(configdir, "config")):
@@ -2364,6 +2505,67 @@ class Modal:
                 Modal.destroy_dialog(stdscr, dialog)
                 return curses.KEY_RESIZE
 
+def selection_dialog(stdscr, title, choices, help_text=None):
+    """Selection dialog that returns the selected index instead of the item"""
+    if Modal.is_active():
+        return None
+    
+    # Calculate dialog size based on content including numbering
+    if choices:
+        max_choice_len = max(len(f"{i+1}. {str(choice)}") for i, choice in enumerate(choices))
+    else:
+        max_choice_len = 0
+    max_width = max(len(title), max_choice_len) + 8  # +8 for borders and padding
+    max_width = max(max_width, 60)  # Minimum width for usability
+    max_width = min(max_width, curses.COLS - 4)  # Don't exceed screen
+    
+    height = min(len(choices) + 6, curses.LINES - 4)  # +6 for title, borders, help
+    width = max_width
+    
+    current = 0
+    
+    Modal.set_active(f"selection_{title}")
+    
+    while True:
+        dialog = Modal.create_dialog(stdscr, width, height, title)
+        
+        # Display choices with numbers
+        display_height = height - 4
+        start_idx = max(0, current - display_height // 2)
+        end_idx = min(len(choices), start_idx + display_height)
+        
+        for i in range(start_idx, end_idx):
+            y = 2 + (i - start_idx)
+            attr = curses.A_REVERSE if i == current else 0
+            choice_text = f"{i+1}. {str(choices[i])}"[:width-6]
+            dialog.addstr(y, 2, choice_text, attr)
+        
+        if help_text is None:
+            help_text = "Enter: Select | q: Cancel"
+        max_help_width = width - 4
+        format_help_text_with_colors(dialog, height-2, 2, help_text, max_help_width)
+        dialog.refresh()
+        
+        key = Modal.get_immediate_key(dialog)
+            
+        if key == ord('q'):  # q to exit
+            Modal.destroy_dialog(stdscr, dialog)
+            Modal.set_active(None)
+            return None
+        elif key in (10, 13):  # Enter
+            selected_index = current if current < len(choices) else None
+            Modal.destroy_dialog(stdscr, dialog)
+            Modal.set_active(None)
+            return selected_index
+        elif key == curses.KEY_UP and current > 0:
+            current -= 1
+        elif key == curses.KEY_DOWN and current < len(choices) - 1:
+            current += 1
+        elif key == curses.KEY_RESIZE:
+            Modal.destroy_dialog(stdscr, dialog)
+            Modal.set_active(None)
+            return curses.KEY_RESIZE
+
 def offer_whole_book_search(stdscr, search_term, ebook, current_index, current_y, width):
     """Ask user if they want to search the whole book"""
     if Modal.is_active():
@@ -2437,7 +2639,7 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
         try:
             if COLORSUPPORT:
                 # Create search highlight color
-                search_color_pair = 250
+                search_color_pair = _SEARCH_PAIR_START
                 try:
                     # Determine color scheme
                     current_bg_pair = curses.pair_number(pad.getbkgd())
@@ -3014,9 +3216,21 @@ def format_help_text_with_colors(dialog, y, x, text, width=None):
         # Add highlighted key name
         key_text = text[start:end]
         try:
-            # Use bright white highlighting for key names
-            key_color_pair = get_color_pair((255, 255, 255))
-            dialog.addstr(y, col, key_text, curses.color_pair(key_color_pair) | curses.A_BOLD)
+            # Use theme-appropriate highlighting for key names
+            if COLORSUPPORT:
+                # Determine current color scheme
+                current_bg_pair = curses.pair_number(dialog.getbkgd())
+                is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
+                
+                if is_light_scheme:
+                    # Light theme: use dark text with bold
+                    dialog.addstr(y, col, key_text, curses.color_pair(1) | curses.A_BOLD)
+                else:
+                    # Dark theme: use bright text with bold  
+                    dialog.addstr(y, col, key_text, curses.color_pair(2) | curses.A_BOLD)
+            else:
+                # No color support, just use bold
+                dialog.addstr(y, col, key_text, curses.A_BOLD)
             col += len(key_text)
         except curses.error:
             break
@@ -3349,37 +3563,52 @@ def searching(stdscr, pad, src, width, y, ch, tot):
 # Smart color palette system
 _color_palette = []  # Pre-computed palette of color indices
 _color_pairs = {}    # Cache of created color pairs  
-_next_color_pair = 1
-_MAX_COLOR_PAIRS = 5000  # Generous limit for images - much more color variety
+_image_cache = {}    # Cache processed images to avoid re-rendering on resize
+_next_color_pair = 4  # Start after pre-defined pairs (1,2,3)  
+_MAX_COLOR_PAIRS = 5000   # Safe range for image colors (pairs 4-5000)
+_SEARCH_PAIR_START = 5001  # Reserved pairs 5001-5050 for search highlighting  
 _SYNTAX_COLOR_PAIRS = {}  # Dedicated cache for syntax highlighting pairs
-_SYNTAX_PAIR_START = 5001  # Reserve pairs 5001-5050 for syntax highlighting
+_SYNTAX_PAIR_START = 5051  # Reserve pairs 5051-5100 for syntax highlighting
+_UI_PAIR_START = 5101     # Reserve pairs 5101+ for loading messages etc.
+
+def get_ui_color_pair(purpose="loading"):
+    """Get a dedicated color pair for UI elements like loading messages."""
+    global _UI_PAIR_START
+    try:
+        if purpose == "loading":
+            pair_id = _UI_PAIR_START
+            # Use predefined color pairs to avoid conflicts
+            return 1  # Default color pair (reliable)
+        return 1  # Fallback to default
+    except:
+        return 1  # Safe fallback
 
 def init_syntax_color_pairs():
     """Pre-allocate color pairs for syntax highlighting in reserved range."""
     global _SYNTAX_COLOR_PAIRS
     
-    # Define syntax highlighting colors
+    # Define syntax highlighting colors - work well on any background
     syntax_colors = [
-        (255, 150, 200),  # Light pink for keywords
-        (180, 255, 180),  # Very light green for strings  
-        (220, 220, 220),  # Very light gray for punctuation
-        (100, 100, 100),  # Dark gray for comments
-        (255, 235, 150),  # Light yellow for classes
-        (200, 255, 200),  # Light green for functions
-        (220, 180, 255),  # Light purple for builtins
-        (255, 200, 150),  # Light orange for numbers
+        (255, 100, 100),  # Red for keywords
+        (100, 255, 100),  # Green for strings  
+        (200, 200, 200),  # Light gray for punctuation
+        (150, 150, 150),  # Gray for comments
+        (255, 255, 100),  # Yellow for classes
+        (100, 200, 255),  # Blue for functions
+        (200, 100, 255),  # Purple for builtins
+        (255, 150, 100),  # Orange for numbers
     ]
     
     # Pre-allocate these colors in the reserved range (5001-5050)
     pair_id = _SYNTAX_PAIR_START
     for color in syntax_colors:
-        if COLORSUPPORT and pair_id <= 5050:
+        if COLORSUPPORT and pair_id <= _SYNTAX_PAIR_START + 50:
             try:
                 # Convert to color indices
                 fg_color = find_closest_palette_color(color)
                 
                 fg_idx = rgb_to_color_index(*fg_color)
-                bg_idx = 0  # Black background
+                bg_idx = -1  # Use default terminal background
                 
                 # Validate indices
                 if fg_idx < 0 or fg_idx > 255: 
@@ -3398,28 +3627,52 @@ def init_smart_color_palette():
     if _color_palette:
         return  # Already initialized
     
-    # Create a strategic palette of 64 well-distributed colors
-    # This includes grayscale and color cube samples
     palette = []
     
-    # Add grayscale (16 levels)
-    for i in range(16):
-        gray = i * 255 // 15
+    # Add full 6x6x6 RGB cube for better color matching
+    # This matches the 216-color cube in the 256-color palette (indices 16-231)
+    # Using the actual xterm-256 color level values for accurate mapping
+    rgb_levels = [0, 95, 135, 175, 215, 255]
+    for r in range(6):
+        for g in range(6):
+            for b in range(6):
+                red = rgb_levels[r]
+                green = rgb_levels[g]
+                blue = rgb_levels[b]
+                palette.append((red, green, blue))
+    
+    # Add 24 grayscale colors (matching indices 232-255)
+    for i in range(24):
+        gray = 8 + i * 10  # Range from 8 to 238
         palette.append((gray, gray, gray))
     
-    # Add color cube samples (48 colors - 4x4x3 grid)  
-    for r in range(4):
-        for g in range(4):
-            for b in range(3):
-                red = r * 255 // 3
-                green = g * 255 // 3
-                blue = b * 255 // 2
-                palette.append((red, green, blue))
+    # Add the 16 basic ANSI colors (indices 0-15) for completeness
+    basic_colors = [
+        (0, 0, 0),       # 0 - Black
+        (205, 0, 0),     # 1 - Red (adjusted for terminal)
+        (0, 205, 0),     # 2 - Green
+        (205, 205, 0),   # 3 - Yellow
+        (0, 0, 238),     # 4 - Blue
+        (205, 0, 205),   # 5 - Magenta
+        (0, 205, 205),   # 6 - Cyan
+        (229, 229, 229), # 7 - White
+        (127, 127, 127), # 8 - Bright Black
+        (255, 0, 0),     # 9 - Bright Red
+        (0, 255, 0),     # 10 - Bright Green
+        (255, 255, 0),   # 11 - Bright Yellow
+        (92, 92, 255),   # 12 - Bright Blue
+        (255, 0, 255),   # 13 - Bright Magenta
+        (0, 255, 255),   # 14 - Bright Cyan
+        (255, 255, 255)  # 15 - Bright White
+    ]
+    for color in basic_colors:
+        if color not in palette:
+            palette.append(color)
     
     _color_palette = palette
 
 def find_closest_palette_color(target_rgb):
-    """Find the closest color in our palette using fuzzy matching."""
+    """Find the closest color in our palette using more discerning matching."""
     if not _color_palette:
         init_smart_color_palette()
     
@@ -3427,16 +3680,25 @@ def find_closest_palette_color(target_rgb):
     best_match = _color_palette[0]
     best_distance = float('inf')
     
+    # Set a reasonable threshold - if no palette color is within this distance,
+    # we'll return the original color to avoid bad matches
+    max_acceptable_distance = 1500  # Roughly 39 units per channel squared - more selective
+    
     for palette_rgb in _color_palette:
-        # Use weighted RGB distance (human eye is more sensitive to green)
-        r_diff = (target_r - palette_rgb[0]) * 0.3
-        g_diff = (target_g - palette_rgb[1]) * 0.59  
-        b_diff = (target_b - palette_rgb[2]) * 0.11
+        # Use standard Euclidean distance for more consistent results
+        r_diff = target_r - palette_rgb[0]
+        g_diff = target_g - palette_rgb[1]
+        b_diff = target_b - palette_rgb[2]
         distance = r_diff*r_diff + g_diff*g_diff + b_diff*b_diff
         
         if distance < best_distance:
             best_distance = distance
             best_match = palette_rgb
+    
+    # If the best match is still too far away, return the original color
+    # This prevents very different colors from being forced into wrong palette entries
+    if best_distance > max_acceptable_distance:
+        return target_rgb
     
     return best_match
 
@@ -3445,23 +3707,34 @@ def rgb_to_color_index(r, g, b):
     try:
         r, g, b = max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
         
-        # Check if it's grayscale
-        if abs(r - g) < 12 and abs(g - b) < 12 and abs(r - b) < 12:
-            gray = int((r + g + b) / 3)
-            if gray < 8:
-                return 0  # Black
-            elif gray > 248:  
-                return 15  # White
-            else:
-                # Map to grayscale 232-255 (24 levels)
-                level = min(23, max(0, (gray - 8) * 23 // 240))
-                return 232 + level
-        else:
-            # Map to 6x6x6 color cube (16-231)
-            r_level = min(5, r * 6 // 256)
-            g_level = min(5, g * 6 // 256)
-            b_level = min(5, b * 6 // 256)
-            return 16 + r_level * 36 + g_level * 6 + b_level
+        # More strict grayscale detection - only truly gray colors
+        # Increased threshold from 12 to 20 to be less aggressive
+        max_diff = max(abs(r - g), abs(g - b), abs(r - b))
+        
+        # Only consider it grayscale if very close in values AND low saturation
+        # This preserves more colored pixels
+        if max_diff < 20:
+            # Check saturation - if there's any color bias, preserve it
+            avg = (r + g + b) / 3
+            color_bias = max(abs(r - avg), abs(g - avg), abs(b - avg))
+            
+            if color_bias < 10:  # Only truly neutral colors become grayscale
+                gray = int((r + g + b) / 3)
+                if gray < 8:
+                    return 0  # Black
+                elif gray > 248:  
+                    return 15  # White
+                else:
+                    # Map to grayscale 232-255 (24 levels)
+                    level = min(23, max(0, (gray - 8) * 23 // 240))
+                    return 232 + level
+        
+        # For colored pixels, use the full 6x6x6 color cube more effectively
+        # Improved quantization to preserve more color variation
+        r_level = min(5, int(r * 5.99 / 256))  # Better distribution
+        g_level = min(5, int(g * 5.99 / 256))
+        b_level = min(5, int(b * 5.99 / 256))
+        return 16 + r_level * 36 + g_level * 6 + b_level
     except:
         return 7  # Default white
 
@@ -3661,6 +3934,100 @@ def render_image_with_quarter_blocks(img, max_width, max_height):
 
 
 
+def detect_image_colorfulness(img, sample_size=100):
+    """Detect if an image is roughly monochromatic (grayscale) or has significant color content.
+    Returns (is_monochrome, avg_saturation) where is_monochrome is True for mostly gray/monochromatic images."""
+    width, height = img.size
+    
+    # Sample pixels evenly across the image
+    sample_points = []
+    step_x = max(1, width // 10)
+    step_y = max(1, height // 10)
+    
+    for y in range(0, height, step_y):
+        for x in range(0, width, step_x):
+            if len(sample_points) >= sample_size:
+                break
+            r, g, b = img.getpixel((x, y))
+            sample_points.append((r, g, b))
+    
+    # Calculate saturation statistics
+    total_saturation = 0
+    color_pixel_count = 0
+    
+    for r, g, b in sample_points:
+        # Calculate saturation using HSV model
+        max_val = max(r, g, b)
+        min_val = min(r, g, b)
+        
+        if max_val == 0:
+            saturation = 0
+        else:
+            saturation = (max_val - min_val) / max_val
+        
+        total_saturation += saturation
+        
+        # Count pixels that have noticeable color (not grayscale)
+        # Use a threshold of 15 to detect color variation
+        if abs(r - g) > 15 or abs(g - b) > 15 or abs(r - b) > 15:
+            color_pixel_count += 1
+    
+    avg_saturation = total_saturation / len(sample_points) if sample_points else 0
+    color_ratio = color_pixel_count / len(sample_points) if sample_points else 0
+    
+    # Consider image monochromatic if less than 20% of pixels have significant color
+    # OR if average saturation is very low
+    is_monochrome = color_ratio < 0.2 or avg_saturation < 0.15
+    
+    return is_monochrome, avg_saturation
+
+def boost_color_saturation(r, g, b, boost_factor=1.5):
+    """Selectively boost saturation ONLY for near-gray colors to prevent them being treated as gray.
+    Already saturated colors are left unchanged."""
+    
+    # Calculate how "gray" this color is
+    max_val = max(r, g, b)
+    min_val = min(r, g, b)
+    avg = (r + g + b) / 3
+    
+    # If it's truly grayscale, don't boost
+    if max_val == min_val:
+        return r, g, b
+    
+    # Calculate current saturation (0-1 scale)
+    if max_val == 0:
+        saturation = 0
+    else:
+        saturation = (max_val - min_val) / max_val
+    
+    # Calculate how much each channel deviates from gray
+    max_deviation = max(abs(r - avg), abs(g - avg), abs(b - avg))
+    
+    # Only boost if the color is near-gray (low saturation, small deviation)
+    # This prevents pale colors from being mapped to grayscale
+    if saturation < 0.3 and max_deviation < 40:
+        # This is a pale/near-gray color that needs boosting
+        # Boost to ensure it stays colored, not gray
+        actual_boost = boost_factor
+    elif saturation < 0.15 and max_deviation < 20:
+        # Very pale - needs stronger boost
+        actual_boost = boost_factor * 1.5
+    else:
+        # Already has enough color - leave it alone
+        actual_boost = 1.0
+    
+    # Apply selective boost
+    new_r = avg + (r - avg) * actual_boost
+    new_g = avg + (g - avg) * actual_boost
+    new_b = avg + (b - avg) * actual_boost
+    
+    # Clamp to valid range
+    new_r = max(0, min(255, int(new_r)))
+    new_g = max(0, min(255, int(new_g)))
+    new_b = max(0, min(255, int(new_b)))
+    
+    return new_r, new_g, new_b
+
 def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
     """Convert image placeholders to block-based representation inline with color info."""
     if not PIL_AVAILABLE or not imgs:
@@ -3835,42 +4202,109 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     if target_pixel_height % 2 != 0:
                         target_pixel_height += 1
                     
-                    img.thumbnail((target_pixel_width, target_pixel_height), Image.Resampling.LANCZOS)
-                    width, height = img.size
+                    # Detect if image is monochromatic or has color before resizing
+                    is_monochrome, avg_saturation = detect_image_colorfulness(img)
+                    
+                    # Determine saturation boost factor based on image colorfulness
+                    if is_monochrome:
+                        # Don't boost monochromatic images - preserve their grays
+                        saturation_boost = 1.0
+                    else:
+                        # For colorful images, use a moderate boost value
+                        # The boost_color_saturation function will selectively apply it
+                        # only to near-gray colors, leaving saturated colors unchanged
+                        saturation_boost = 1.5  # This value is only applied to pale colors
+                    
+                    # Keep original image for high-quality oversampling
+                    orig_img = img.copy()
+                    orig_w, orig_h = orig_img.size
+                    
+                    # Calculate target dimensions
+                    target_width = target_pixel_width
+                    target_height = target_pixel_height
                     
                     # Ensure height is even for proper half-block pairing
-                    if height % 2 != 0:
-                        # Create a new image with even height by adding a row
-                        new_img = Image.new('RGB', (width, height + 1), (0, 0, 0))
-                        new_img.paste(img, (0, 0))
-                        img = new_img
-                        width, height = img.size
+                    if target_height % 2 != 0:
+                        target_height += 1
+                    
+                    # Calculate sampling regions for each output pixel
+                    x_scale = orig_w / target_width
+                    y_scale = orig_h / target_height
                     
                     # Unicode quarter-block characters for 2x2 pixel mapping
                     blocks = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█']
                     
-                    # Store color and character info for each line - 2x taller, 4x wider
-                    # Now with 2x sampling resolution in both directions
-                    for y in range(0, height, 2):  # Process 2 rows at a time (proper half-block technique)
+                    # Store color and character info for each line with oversampling
+                    for y in range(0, target_height, 2):  # Process 2 rows at a time (proper half-block technique)
                         line = ""
                         line_colors = []
                         
-                        # Process each column of pixels (simple 1:1 mapping)
-                        for x in range(width):
-                            # Get top and bottom pixels for this character
-                            top_y = min(y, height - 1)
-                            bottom_y = min(y + 1, height - 1)
+                        # Process each column of pixels with oversampling from original
+                        for x in range(target_width):
+                            # Calculate source region in original image for this output pixel
+                            src_x_start = int(x * x_scale)
+                            src_x_end = max(src_x_start + 1, int((x + 1) * x_scale))
+                            src_y_top_start = int(y * y_scale)
+                            src_y_top_end = max(src_y_top_start + 1, int((y + 1) * y_scale))
+                            src_y_bot_start = int((y + 1) * y_scale)
+                            src_y_bot_end = max(src_y_bot_start + 1, int(min((y + 2) * y_scale, orig_h)))
                             
-                            # Sample the pixels
-                            if x < width and top_y < height:
-                                top_pixel = img.getpixel((x, top_y))
+                            # Scattergun sampling for much better performance
+                            import random
+                            top_samples = []
+                            num_samples = 16  # Much fewer samples than 8x8=64, but randomly distributed
+                            
+                            # Set seed for consistent results per pixel coordinate
+                            random.seed(x + y * 10000)
+                            
+                            for _ in range(num_samples):
+                                # Random position within top half region
+                                random_x = random.uniform(0, 1)
+                                random_y = random.uniform(0, 1)
+                                
+                                precise_x = src_x_start + (random_x * (src_x_end - src_x_start))
+                                precise_y = src_y_top_start + (random_y * (src_y_top_end - src_y_top_start))
+                                
+                                # Convert to integer for pixel access, with bounds checking
+                                pixel_x = min(int(precise_x), orig_w - 1)
+                                pixel_y = min(int(precise_y), orig_h - 1)
+                                
+                                if pixel_x >= 0 and pixel_y >= 0:
+                                    top_samples.append(orig_img.getpixel((pixel_x, pixel_y)))
+                            
+                            # Scattergun sampling for bottom half region
+                            bottom_samples = []
+                            
+                            for _ in range(num_samples):
+                                # Random position within bottom half region  
+                                random_x = random.uniform(0, 1)
+                                random_y = random.uniform(0, 1)
+                                
+                                precise_x = src_x_start + (random_x * (src_x_end - src_x_start))
+                                precise_y = src_y_bot_start + (random_y * (src_y_bot_end - src_y_bot_start))
+                                
+                                # Convert to integer for pixel access, with bounds checking
+                                pixel_x = min(int(precise_x), orig_w - 1)
+                                pixel_y = min(int(precise_y), orig_h - 1)
+                                
+                                if pixel_x >= 0 and pixel_y >= 0:
+                                    bottom_samples.append(orig_img.getpixel((pixel_x, pixel_y)))
+                            
+                            # Average the samples for smoother colors
+                            if top_samples:
+                                top_pixel = tuple(sum(c[i] for c in top_samples) // len(top_samples) for i in range(3))
                             else:
                                 top_pixel = (0, 0, 0)
                                 
-                            if x < width and bottom_y < height:
-                                bottom_pixel = img.getpixel((x, bottom_y))
+                            if bottom_samples:
+                                bottom_pixel = tuple(sum(c[i] for c in bottom_samples) // len(bottom_samples) for i in range(3))
                             else:
                                 bottom_pixel = (0, 0, 0)
+                            
+                            # Apply saturation boost if needed (only for colorful images)
+                            if saturation_boost > 1.0:
+                                top_pixel = boost_color_saturation(*top_pixel, saturation_boost)
+                                bottom_pixel = boost_color_saturation(*bottom_pixel, saturation_boost)
                             
                             # Ensure colors are valid
                             fg_color = tuple(max(0, min(255, c)) for c in top_pixel)
@@ -3929,6 +4363,10 @@ def show_loading_animation(stdscr, message="Loading..."):
     center_row = rows // 2
     center_col = cols // 2
     
+    # Determine current color scheme
+    current_bg_pair = curses.pair_number(stdscr.getbkgd())
+    is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
+    
     # Don't clear screen - preserve current background
     # Just clear the message area to avoid artifacts
     msg_len = len(message)
@@ -3944,8 +4382,15 @@ def show_loading_animation(stdscr, message="Loading..."):
     
     # Create saturated two-color gradient with doubled sequence
     gradient_steps = 16  # Steps for one direction
-    start_color = (100, 150, 255)  # Bright blue (saturated)
-    end_color = (100, 255, 200)    # Bright cyan-green (saturated)
+    
+    if is_light_scheme:
+        # Darker colors for light theme - better visibility
+        start_color = (0, 50, 150)     # Dark blue
+        end_color = (0, 120, 100)      # Dark teal
+    else:
+        # Bright colors for dark theme
+        start_color = (100, 150, 255)  # Bright blue (saturated)
+        end_color = (100, 255, 200)    # Bright cyan-green (saturated)
     
     # Generate doubled sequence: dark→light→dark→light
     spectrum_colors = []
@@ -3977,14 +4422,26 @@ def update_loading_animation(stdscr, message, start_col, center_row, spectrum_co
             color_idx = (step + i) % len(spectrum_colors)
             r, g, b = spectrum_colors[color_idx]
             
-            # Get color pair for this RGB value
+            # Create rolling spectrum animation with actual RGB colors
             if COLORSUPPORT:
-                color_pair = get_color_pair((r, g, b), (-1, -1, -1))  # No background
-                if color_pair > 0:
-                    stdscr.addstr(center_row, start_col + i, char, 
-                                curses.color_pair(color_pair) | curses.A_BOLD)
-                else:
-                    # Fallback to bold if color fails
+                try:
+                    # Get RGB color from spectrum
+                    r, g, b = spectrum_colors[color_idx]
+                    
+                    # Convert RGB to terminal color index
+                    color_idx_terminal = rgb_to_color_index(r, g, b)
+                    
+                    # Try to get or create color pair 
+                    pair_id, _ = get_color_pair_with_reversal((r, g, b), (0, 0, 0), allow_reversal=False)
+                    
+                    if pair_id > 0:
+                        # Use the spectrum color pair
+                        stdscr.addstr(center_row, start_col + i, char, curses.color_pair(pair_id) | curses.A_BOLD)
+                    else:
+                        # Fallback: use terminal color directly if pair creation failed
+                        stdscr.addstr(center_row, start_col + i, char, curses.color_pair(color_idx_terminal) | curses.A_BOLD)
+                except:
+                    # Final fallback to bold
                     stdscr.addstr(center_row, start_col + i, char, curses.A_BOLD)
             else:
                 # No color support, just use bold
@@ -4146,23 +4603,8 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 current_bg_pair = curses.pair_number(pad.getbkgd())
                 is_light_theme = current_bg_pair == 3  # Light theme is color pair 3
                 
-                # First, fill the entire line with appropriate background based on theme
-                if COLORSUPPORT:
-                    if is_light_theme:
-                        # Light theme: use a light gray background for code blocks
-                        code_bg_pair = get_color_pair((32, 32, 32), (240, 240, 240))  # Dark text on light gray background
-                    else:
-                        # Dark/default theme: use dark background as before
-                        code_bg_pair = get_color_pair((200, 200, 200), (32, 32, 32))  # Light gray text on dark gray background
-                    
-                    if code_bg_pair <= 0:
-                        # Fallback: try the syntax color system with appropriate background
-                        if is_light_theme:
-                            code_bg_pair = get_syntax_color_pair((50, 50, 50), (240, 240, 240))
-                        else:
-                            code_bg_pair = get_syntax_color_pair((200, 200, 200), (32, 32, 32))
-                    
-                    if code_bg_pair > 0:
+                # Skip background filling for now - just use normal text rendering
+                if False:  # Disable complex background code
                         # Fill from text start to right edge of terminal with appropriate background
                         for bg_col in range(cols - x):
                             try:
@@ -4203,11 +4645,11 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                 
                                 if color_tuple and isinstance(color_tuple, (tuple, list)) and len(color_tuple) == 3:
                                     # Get or create color pair for this syntax color with appropriate background
-                                    # Use light gray background for light theme, dark gray for others
+                                    # Use light gray background for light theme, pure black for dark modes
                                     if is_light_theme:
                                         syntax_bg_color = (240, 240, 240)  # Light gray background for light theme
                                     else:
-                                        syntax_bg_color = (32, 32, 32)  # Dark gray background for dark themes
+                                        syntax_bg_color = (0, 0, 0)  # Pure black background for dark themes
                                     
                                     color_pair = get_syntax_color_pair(color_tuple, syntax_bg_color)
                                     if color_pair > 0:
@@ -4233,6 +4675,25 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                     pad.addstr(n, char_idx, char)
                                 except:
                                     break  # Stop if we can't write anymore
+                        
+                        # Fill remaining line with background color for code blocks
+                        text_end = min(len(text_part), cols - x)
+                        if text_end < cols - x:
+                            # Determine background color based on theme
+                            if is_light_theme:
+                                bg_color = (240, 240, 240)  # Light gray
+                            else:
+                                bg_color = (0, 0, 0)        # Pure black
+                            
+                            # Get or create background color pair
+                            bg_pair = get_syntax_color_pair((128, 128, 128), bg_color)  # Gray text on background
+                            if bg_pair > 0:
+                                # Fill from end of text to right edge
+                                for fill_col in range(text_end, cols - x):
+                                    try:
+                                        pad.addstr(n, fill_col, " ", curses.color_pair(bg_pair))
+                                    except:
+                                        break  # Stop if we can't write anymore
                         
                         # Highlight search results with inverse video bright
                         if CURRENT_SEARCH_TERM:
@@ -4268,7 +4729,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                                     is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
                                                     
                                                     # Try to create a search highlight color pair
-                                                    search_color_pair = 250  # Use high pair number to avoid conflicts
+                                                    search_color_pair = _SEARCH_PAIR_START  # Use high pair number to avoid conflicts
                                                     
                                                     if is_light_scheme:
                                                         # Light mode: bright white text on black background
@@ -4853,467 +5314,41 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     if len(visible_images) == 1:
                         # Single image found, open it directly
                         img_path = visible_images[0][0]
-                        try:
-                            # Get correct image path using dots_path
-                            imgsrc = dots_path(chpath, img_path)
-                            
-                            # Extract and save the image to temp file
-                            img_data = ebook.file.read(imgsrc)
-                            
-                            # Determine file extension
-                            ext = os.path.splitext(img_path)[1] or '.png'
-                            
-                            # Create temp file
-                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                                tmp.write(img_data)
-                                tmp_path = tmp.name
-                            
-                            # Open with system default viewer
-                            if os.name == 'posix':
-                                subprocess.run(['xdg-open', tmp_path], 
-                                             stdout=subprocess.DEVNULL, 
-                                             stderr=subprocess.DEVNULL,
-                                             check=False)
-                            elif os.name == 'nt':
-                                subprocess.run(['start', tmp_path], shell=True, 
-                                             stdout=subprocess.DEVNULL, 
-                                             stderr=subprocess.DEVNULL,
-                                             check=False)
-                            else:
-                                subprocess.run(['open', tmp_path], 
-                                             stdout=subprocess.DEVNULL, 
-                                             stderr=subprocess.DEVNULL,
-                                             check=False)
-                        except Exception as e:
-                            # Show error briefly (single image case)
-                            pass  # Can't show error in single image case without clearing screen
+                        open_image_in_system_viewer(ebook, chpath, img_path)
                     else:
-                        # Multiple images found, let user choose with pagination support
-                        current_page = 0
-                        images_per_page = 8  # Will be adjusted based on screen size (up to 4x2)
+                        # Multiple images found, show simple text list to choose from
+                        # Build list of image descriptions with filename, alt, caption, figure info
+                        image_choices = []
+                        for i, (img_path, line_num, img_idx) in enumerate(visible_images):
+                            # Get enhanced label with all available info
+                            label = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, line_num)
+                            
+                            # DEBUG: Log what's happening
+                            try:
+                                with open('/tmp/termbook_debug.log', 'a') as f:
+                                    f.write(f"DEBUG: Image {i}: {img_path}\n")
+                                    f.write(f"  line_num: {line_num}, img_idx: {img_idx}\n")
+                                    f.write(f"  label: '{label}'\n")
+                                    f.write(f"  img_alts[{img_idx}]: '{img_alts[img_idx] if img_idx < len(img_alts) else 'OUT_OF_RANGE'}'\n")
+                            except:
+                                pass
+                            
+                            # Add filename for clarity
+                            filename = os.path.basename(img_path)
+                            full_desc = f"{filename}"
+                            if label and label != filename:
+                                full_desc += f" - {label}"
+                            
+                            image_choices.append(full_desc)
                         
-                        while True:
-                            stdscr.clear()
-                            
-                            # Calculate images for current page
-                            start_idx = current_page * images_per_page
-                            end_idx = min(start_idx + images_per_page, len(visible_images))
-                            current_images = visible_images[start_idx:end_idx]
-                            
-                            # EXPERIMENTAL: Use full screen for larger thumbnails
-                            left_margin = 1  # Absolute minimal margin
-                            
-                            # Use maximum available space
-                            available_width = cols - 2  # Just 1 char margin on each side
-                            available_height = rows - 2  # Just footer (1) + 1 line blank at top for sanity
-                            
-                            # Simple grid: 2 columns for 80+ width screens
-                            if cols >= 80:
-                                # Normal or wide screen - 2 columns
-                                max_cols = 2
-                                max_rows = 3  # Up to 6 images
-                            else:
-                                # Narrow screen (less than 80) - 1 column
-                                max_cols = 1
-                                max_rows = 4  # Up to 4 images stacked
-                            
-                            # Calculate maximum thumbnail size based on grid
-                            # Minimal gaps between thumbnails (1 char horizontal, 1 line vertical)
-                            thumb_width = (available_width - (max_cols - 1) * 1) // max_cols
-                            thumb_height = (available_height - (max_rows - 1) * 1 - max_rows) // max_rows  # -max_rows for labels
-                            
-                            # Ensure minimum viable size
-                            thumb_width = max(8, thumb_width)
-                            thumb_height = max(4, thumb_height)
-                            
-                            # Limit to reasonable maximums (increased for full-screen usage)
-                            thumb_width = min(thumb_width, 60)  # Increased from 40
-                            thumb_height = min(thumb_height, 30)  # Increased from 20
-                            
-                            # Calculate actual spacing between thumbnails
-                            # Distribute remaining space evenly
-                            total_thumb_width = max_cols * thumb_width
-                            total_thumb_height = max_rows * (thumb_height + 1)  # +1 for labels
-                            
-                            h_spacing = max(0, (available_width - total_thumb_width) // (max_cols + 1))
-                            v_spacing = max(0, (available_height - total_thumb_height) // (max_rows + 1))
-                            
-                            # Very minimal spacing
-                            h_spacing = max(0, min(1, h_spacing))  # At most 1 char spacing
-                            v_spacing = max(0, min(1, v_spacing))  # At most 1 line spacing
-                            
-                            # For compatibility with existing code
-                            chars_per_thumbnail = thumb_width + h_spacing
-                            max_possible_cols = max_cols  # Already calculated above
-                            
-                            # Determine grid layout based on what actually fits
-                            if max_possible_cols >= 4 and rows >= 24:  # 4 columns if very wide
-                                max_cols = 4
-                                max_rows = 2
-                                max_thumbnails = 8
-                            elif max_possible_cols >= 3 and rows >= 20:  # 3 columns 
-                                max_cols = 3
-                                max_rows = 2
-                                max_thumbnails = 6
-                            elif max_possible_cols >= 2 and rows >= 16:  # 2 columns
-                                max_cols = 2 
-                                max_rows = 2
-                                max_thumbnails = 4
-                            else:  # Only 1 column fits or very narrow terminal
-                                max_cols = 1
-                                max_rows = min(3, (rows - 8) // (thumb_height + 4))  # Stack vertically
-                                max_thumbnails = max_rows
-                                
-                            # Adjust height based on available space
-                            available_height = rows - 8
-                            max_thumb_height = (available_height // max_rows) - 3  # Leave space for labels
-                            thumb_height = min(thumb_height, max_thumb_height, 12)
-                            
-                            # Update images_per_page based on layout
-                            images_per_page = max_thumbnails
-                            
-                            # Only show thumbnails up to the number we can display 
-                            display_count = min(len(current_images), max_thumbnails)
-                            
-                            # Debug: show terminal size vs layout
-                            if os.getenv('TERMBOOK_DEBUG'):
-                                print(f"DEBUG: Terminal {cols}x{rows}, can fit {max_cols}x{max_rows} = {max_thumbnails} thumbnails", file=sys.stderr)
-                            
-                            # Try to show thumbnails if PIL is available and we have images to display
-                            if PIL_AVAILABLE and COLORSUPPORT and display_count > 0:
-                                # Leave top line blank for sanity (no redundant header text)
-                                
-                                # Show thumbnails with fluid layout
-                                for idx in range(display_count):
-                                    img_path, line_num, img_idx = current_images[idx]
-                                    
-                                    # Calculate grid position - fill columns first
-                                    grid_row = idx // max_cols
-                                    grid_col = idx % max_cols
-                                
-                                    # Starting position using calculated spacing to fill screen
-                                    # +1 to account for blank top line
-                                    start_y = 1 + v_spacing + (grid_row * (thumb_height + v_spacing + 1))  # +1 for label
-                                    start_x = h_spacing + (grid_col * (thumb_width + h_spacing))
-                                    
-                                    # Draw number at exact thumbnail position minus one row
-                                    thumb_start_y = start_y + 1  # Where thumbnail actually starts
-                                    thumb_start_x = start_x     # Where thumbnail actually starts
-                                    
-                                    # Place number one row above thumbnail
-                                    number_y = thumb_start_y - 1
-                                    number_x = thumb_start_x
-                                    
-                                    if number_y >= 0 and number_y < rows and number_x >= 0 and number_x + 5 < cols:
-                                        try:
-                                            stdscr.addstr(number_y, number_x, f"[{idx+1}]", curses.A_BOLD)
-                                        except curses.error:
-                                            pass
-                                
-                                    try:
-                                        # Load and create mini thumbnail
-                                        imgsrc = dots_path(chpath, img_path)
-                                        img_data = ebook.file.read(imgsrc)
-                                        from PIL import Image
-                                        from io import BytesIO
-                                        img = Image.open(BytesIO(img_data))
-                                    
-                                        # Convert to RGB if needed
-                                        if img.mode != 'RGB':
-                                            img = img.convert('RGB')
-                                        
-                                        # Keep original image for sampling - don't resize yet
-                                        orig_width, orig_height = img.size
-                                        
-                                        # Calculate actual thumbnail size maintaining aspect ratio
-                                        max_thumb_width = thumb_width
-                                        max_thumb_height = thumb_height - 1  # Reserve 1 line for alt text
-                                        
-                                        # Account for character aspect ratio (chars are ~2x taller than wide)
-                                        # So we need to adjust for proper visual aspect ratio
-                                        # Each character height represents 2 pixels vertically (half-block)
-                                        adjusted_max_height = max_thumb_height * 2  # Double for half-block technique
-                                        
-                                        # Calculate scaling to fit within bounds while maintaining aspect ratio
-                                        width_scale = max_thumb_width / orig_width
-                                        height_scale = adjusted_max_height / orig_height
-                                        scale = min(width_scale, height_scale)
-                                        
-                                        # Calculate actual display dimensions
-                                        actual_thumb_width = max(1, int(orig_width * scale))
-                                        actual_pixel_height = max(2, int(orig_height * scale))
-                                        
-                                        # Ensure pixel height is even for half-block pairing
-                                        if actual_pixel_height % 2 == 1:
-                                            actual_pixel_height += 1
-                                        
-                                        # Convert pixel height back to character height
-                                        actual_thumb_height = actual_pixel_height // 2
-                                        
-                                        # Ensure we don't exceed maximums
-                                        actual_thumb_width = min(actual_thumb_width, max_thumb_width)
-                                        actual_thumb_height = min(actual_thumb_height, max_thumb_height)
-                                        
-                                        # Center the thumbnail within its allocated space
-                                        h_offset = (max_thumb_width - actual_thumb_width) // 2
-                                        v_offset = (max_thumb_height - actual_thumb_height) // 2
-                                        
-                                        # Adjust starting position for centering
-                                        centered_start_x = start_x + h_offset
-                                        centered_start_y = start_y + 1 + v_offset
-                                        
-                                        # Sample directly from original full-resolution image using half-block technique
-                                        # Each character represents 2 pixels vertically (upper and lower half)
-                                        for char_y in range(actual_thumb_height):
-                                            if centered_start_y + char_y >= rows:
-                                                break
-                                            
-                                            for char_x in range(actual_thumb_width):
-                                                if centered_start_x + char_x >= cols:
-                                                    break
-                                                    
-                                                # Map thumbnail character position to original image region
-                                                # Each character represents 2 vertical pixels (upper and lower half)
-                                                # We already calculated actual_pixel_height above maintaining aspect ratio
-                                                
-                                                # Use floating point coordinates with safe border offset
-                                                border_offset = 0.5  # Offset by half a pixel to avoid exact edges
-                                                safe_width = orig_width - 1  # Leave 1 pixel margin
-                                                safe_height = orig_height - 1  # Leave 1 pixel margin
-                                                
-                                                # Map character position to image coordinates
-                                                img_x_start = border_offset + (char_x * safe_width) / actual_thumb_width
-                                                img_x_end = border_offset + ((char_x + 1) * safe_width) / actual_thumb_width
-                                                
-                                                # Each character row represents 2 image rows
-                                                img_y_top = border_offset + (char_y * 2 * safe_height) / actual_pixel_height
-                                                img_y_middle = border_offset + ((char_y * 2 + 1) * safe_height) / actual_pixel_height
-                                                img_y_bottom = border_offset + ((char_y * 2 + 2) * safe_height) / actual_pixel_height
-                                                
-                                                # Sample colors for upper half of character
-                                                top_colors = []
-                                                samples_per_dim = 4  # 4x4 sampling grid
-                                                
-                                                for sample_y in range(samples_per_dim):
-                                                    for sample_x in range(samples_per_dim):
-                                                        # Calculate position within upper half
-                                                        precise_x = img_x_start + (sample_x * (img_x_end - img_x_start)) / samples_per_dim
-                                                        precise_y = img_y_top + (sample_y * (img_y_middle - img_y_top)) / samples_per_dim
-                                                        
-                                                        # Convert to integer for pixel access, with bounds checking
-                                                        pixel_x = min(int(precise_x), orig_width - 1)
-                                                        pixel_y = min(int(precise_y), orig_height - 1)
-                                                        
-                                                        r, g, b = img.getpixel((pixel_x, pixel_y))
-                                                        top_colors.append((r, g, b))
-                                                
-                                                # Sample colors for lower half of character
-                                                bottom_colors = []
-                                                
-                                                for sample_y in range(samples_per_dim):
-                                                    for sample_x in range(samples_per_dim):
-                                                        # Calculate position within lower half
-                                                        precise_x = img_x_start + (sample_x * (img_x_end - img_x_start)) / samples_per_dim
-                                                        precise_y = img_y_middle + (sample_y * (img_y_bottom - img_y_middle)) / samples_per_dim
-                                                        
-                                                        # Convert to integer for pixel access, with bounds checking
-                                                        pixel_x = min(int(precise_x), orig_width - 1)
-                                                        pixel_y = min(int(precise_y), orig_height - 1)
-                                                        
-                                                        r, g, b = img.getpixel((pixel_x, pixel_y))
-                                                        bottom_colors.append((r, g, b))
-                                                
-                                                # Average colors for each half
-                                                if top_colors:
-                                                    avg_top = tuple(sum(c[i] for c in top_colors) // len(top_colors) for i in range(3))
-                                                else:
-                                                    avg_top = (128, 128, 128)
-                                                
-                                                if bottom_colors:
-                                                    avg_bottom = tuple(sum(c[i] for c in bottom_colors) // len(bottom_colors) for i in range(3))
-                                                else:
-                                                    avg_bottom = (128, 128, 128)
-                                                
-                                                # Use the half-block technique with foreground/background colors
-                                                # Try to get color pair with potential reversal
-                                                color_pair, use_reversed = get_color_pair_with_reversal(avg_top, avg_bottom, allow_reversal=True)
-                                                
-                                                try:
-                                                    if color_pair and COLORSUPPORT:
-                                                        if use_reversed:
-                                                            # Use lower half block with reversed colors
-                                                            stdscr.addstr(centered_start_y + char_y, centered_start_x + char_x, '▄', curses.color_pair(color_pair))
-                                                        else:
-                                                            # Use upper half block with normal colors
-                                                            stdscr.addstr(centered_start_y + char_y, centered_start_x + char_x, '▀', curses.color_pair(color_pair))
-                                                    else:
-                                                        # Fallback to simple character based on luminance
-                                                        top_lum = int(0.299 * avg_top[0] + 0.587 * avg_top[1] + 0.114 * avg_top[2])
-                                                        bottom_lum = int(0.299 * avg_bottom[0] + 0.587 * avg_bottom[1] + 0.114 * avg_bottom[2])
-                                                        
-                                                        if top_lum > 200 and bottom_lum > 200:
-                                                            char = ' '  # Both bright
-                                                        elif top_lum < 50 and bottom_lum < 50:
-                                                            char = '█'  # Both dark
-                                                        elif top_lum > bottom_lum:
-                                                            char = '▀'  # Top brighter
-                                                        else:
-                                                            char = '▄'  # Bottom brighter
-                                                        
-                                                        stdscr.addstr(centered_start_y + char_y, centered_start_x + char_x, char)
-                                                except curses.error:
-                                                    pass
-                                    
-                                        # Show enhanced label with figure number below thumbnail (centered)
-                                        # Use precise line mapping to get the actual line where this image appears
-                                        actual_line_num = line_num
-                                        if image_line_map:
-                                            # Find the first line where this image appears
-                                            for i, mapped_img_idx in enumerate(image_line_map):
-                                                if mapped_img_idx == img_idx:
-                                                    actual_line_num = i
-                                                    break
-                                        label = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, actual_line_num)
-                                        # Truncate to fit thumbnail width
-                                        if len(label) > actual_thumb_width:
-                                            label = label[:actual_thumb_width - 3] + "..."
-                                        
-                                        # Center the label under the thumbnail
-                                        label_x = centered_start_x + (actual_thumb_width - len(label)) // 2
-                                        label_y = centered_start_y + actual_thumb_height
-                                        
-                                        if label_y < rows and label_x >= 0 and label_x + len(label) < cols:
-                                            try:
-                                                stdscr.addstr(label_y, label_x, label, curses.A_DIM)
-                                            except curses.error:
-                                                pass
-                                    except:
-                                        # If thumbnail fails, show enhanced label
-                                        label = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, line_num)
-                                        # Truncate to fit available width
-                                        if len(label) > actual_thumb_width:
-                                            label = label[:actual_thumb_width - 3] + "..."
-                                        if start_y + 1 < rows and start_x >= 0 and start_x + len(label) < cols:
-                                            try:
-                                                stdscr.addstr(start_y + 1, start_x, label)
-                                            except curses.error:
-                                                pass
-                                
-                                # Show navigation instructions with specific quit key
-                                footer = f"Press 1-{display_count} to open image"
-                                if len(visible_images) > max_thumbnails:
-                                    footer += ", n/p for next/prev page"
-                                footer += ", q to quit"
-                                stdscr.addstr(rows - 1, 0, footer[:cols-1])
-                            else:
-                                # Fallback to text list with pagination
-                                header = f"Found {len(visible_images)} images. Select one to open:"
-                                if len(visible_images) > images_per_page:
-                                    total_pages = (len(visible_images) + images_per_page - 1) // images_per_page
-                                    header += f" Page {current_page + 1}/{total_pages}"
-                                stdscr.addstr(0, 0, header)
-                                
-                                # Calculate how many images we can show based on screen height
-                                available_lines = rows - 4  # Reserve lines for header and footer
-                                num_to_show = min(len(current_images), available_lines)
-                                
-                                for i in range(num_to_show):
-                                    img_path, line_num, img_idx = current_images[i]
-                                    # Use enhanced label with figure number
-                                    display_name = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, line_num)
-                                        
-                                    # Truncate to fit screen width
-                                    max_width = cols - 5  # Account for "1. " prefix
-                                    if len(display_name) > max_width:
-                                        display_name = display_name[:max_width-3] + "..."
-                                        
-                                    # Only add if it fits on screen
-                                    if i + 2 < rows - 1:
-                                        stdscr.addstr(i + 2, 0, f"{i+1}. {display_name}")
-                                
-                                # Show navigation instructions
-                                if rows - 1 > num_to_show + 2:
-                                    footer = "Press 1-9 to open image"
-                                    if len(visible_images) > images_per_page:
-                                        footer += ", n/p for next/prev page"
-                                    footer += ", or any other key to cancel"
-                                    stdscr.addstr(rows - 1, 0, footer[:cols-1])
-                            stdscr.refresh()
-                            
-                            choice = stdscr.getch()
-                            
-                            # Handle navigation
-                            if choice == curses.KEY_RESIZE:
-                                # Exit on resize - let main reader handle redraw
-                                k = curses.KEY_RESIZE
-                                break
-                            elif choice == ord('q') or choice == ord('Q'):  # q or Q to exit
-                                # Quit explicitly - clear screen first for clean return to reader
-                                stdscr.clear()
-                                stdscr.refresh()
-                                break
-                            elif choice == ord('n') or choice == ord('N'):
-                                # Next page
-                                if max_thumbnails > 0:
-                                    total_pages = (len(visible_images) + max_thumbnails - 1) // max_thumbnails
-                                    if current_page < total_pages - 1:
-                                        current_page += 1
-                                continue
-                            elif choice == ord('p') or choice == ord('P'):
-                                # Previous page
-                                if current_page > 0:
-                                    current_page -= 1
-                                continue
-                            elif ord('1') <= choice <= ord('8'):
-                                # Select image from current page (only up to display_count, max 8)
-                                choice_idx = choice - ord('1')
-                                if choice_idx < display_count:
-                                    selected_idx = start_idx + choice_idx
-                                    if selected_idx < len(visible_images):
-                                        img_path = visible_images[selected_idx][0]
-                                        try:
-                                            # Get correct image path using dots_path
-                                            imgsrc = dots_path(chpath, img_path)
-                                            
-                                            # Extract and save the image to temp file
-                                            img_data = ebook.file.read(imgsrc)
-                                            
-                                            # Determine file extension
-                                            ext = os.path.splitext(img_path)[1] or '.png'
-                                            
-                                            # Create temp file
-                                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-                                                tmp.write(img_data)
-                                                tmp_path = tmp.name
-                                    
-                                            # Open with system default viewer
-                                            if os.name == 'posix':
-                                                subprocess.run(['xdg-open', tmp_path], 
-                                                             stdout=subprocess.DEVNULL, 
-                                                             stderr=subprocess.DEVNULL,
-                                                             check=False)
-                                            elif os.name == 'nt':
-                                                subprocess.run(['start', tmp_path], shell=True, 
-                                                             stdout=subprocess.DEVNULL, 
-                                                             stderr=subprocess.DEVNULL,
-                                                             check=False)
-                                            else:
-                                                subprocess.run(['open', tmp_path], 
-                                                             stdout=subprocess.DEVNULL, 
-                                                             stderr=subprocess.DEVNULL,
-                                                             check=False)
-                                            # Continue to redraw thumbnails after opening image
-                                            continue
-                                        except Exception as e:
-                                            # Show error briefly if something goes wrong
-                                            stdscr.addstr(rows - 1, 0, f"Error: {str(e)[:60]}")
-                                            stdscr.refresh()
-                                            curses.napms(2000)  # Show for 2 seconds
-                                            continue  # Redraw thumbnails after showing error
-                            # Continue loop for any other keys (no action)
-                        # Return to normal display - clear screen for main reader redraw
-                        stdscr.clear()
-                        stdscr.refresh()
+                        # Show selection dialog
+                        selected = selection_dialog(stdscr, "Select Image to Open:", image_choices, 
+                                                  help_text="Enter: Open | q: Cancel")
+                        
+                        if selected is not None and selected < len(visible_images):
+                            # Open selected image
+                            img_path = visible_images[selected][0]
+                            open_image_in_system_viewer(ebook, chpath, img_path)
                 else:
                     # No visible images found - show brief message
                     stdscr.addstr(rows - 1, 0, " No images visible on this screen ", curses.A_REVERSE)
@@ -5354,9 +5389,9 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 # Visual cue: show resize info briefly
                 try:
                     stdscr.clear()
-                    stdscr.addstr(0, 0, f"RESIZED: {cols}x{rows}, width: {width} -> {new_width}")
+                    stdscr.addstr(0, 0, f"Resizing ({cols}x{rows}), please wait...")
                     stdscr.refresh()
-                    time.sleep(0.2)  # Show briefly
+                    time.sleep(0.5)  # Show briefly but long enough to read
                 except:
                     pass
                 
@@ -5454,6 +5489,14 @@ def reader(stdscr, ebook, index, width, y, pctg):
 
 def preread(stdscr, file):
     global COLORSUPPORT
+    
+    # Show loading message immediately
+    try:
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Loading...")
+        stdscr.refresh()
+    except:
+        pass
 
     curses.start_color()  # Enable color support
     curses.use_default_colors()
@@ -5467,8 +5510,6 @@ def preread(stdscr, file):
         
         # Initialize smart color palette for image rendering
         init_smart_color_palette()
-        global _next_color_pair
-        _next_color_pair = 4  # Start after the pre-defined pairs
         
         # Pre-allocate syntax highlighting color pairs
         init_syntax_color_pairs()
@@ -5481,6 +5522,14 @@ def preread(stdscr, file):
     stdscr.clear()
     rows, cols = stdscr.getmaxyx()
     stdscr.refresh()
+
+    # Show loading message for EPUB processing
+    try:
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Loading EPUB...")
+        stdscr.refresh()
+    except:
+        pass
 
     epub = Epub(file)
 
@@ -5654,7 +5703,7 @@ def main():
         bookmark_locations = []
         if os.getenv("HOME"):
             state_locations.append(os.path.join(os.getenv("HOME"), ".termbook"))
-            state_locations.append(os.path.join(os.getenv("HOME"), ".config", "epr", "config"))
+            state_locations.append(os.path.join(os.getenv("HOME"), ".config", "termbook", "config"))
             bookmark_locations.append(os.path.join(os.getenv("HOME"), ".termbook_bookmarks.json"))
             bookmark_locations.append(os.path.join(os.getenv("HOME"), ".config", "termbook", "bookmarks.json"))
         elif os.getenv("USERPROFILE"):
