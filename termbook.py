@@ -39,7 +39,7 @@ Key Binding:
 
 
 __version__ = "1.1.1"
-__build_time__ = "2025-08-25 21:03:21"
+__build_time__ = "2025-08-25 21:44:41"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -2639,7 +2639,7 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
         try:
             if COLORSUPPORT:
                 # Create search highlight color
-                search_color_pair = _SEARCH_PAIR_START
+                search_color_pair = 10  # Use a low reserved pair for search
                 try:
                     # Determine color scheme
                     current_bg_pair = curses.pair_number(pad.getbkgd())
@@ -3565,18 +3565,15 @@ _color_palette = []  # Pre-computed palette of color indices
 _color_pairs = {}    # Cache of created color pairs  
 _image_cache = {}    # Cache processed images to avoid re-rendering on resize
 _next_color_pair = 4  # Start after pre-defined pairs (1,2,3)  
-_MAX_COLOR_PAIRS = 5000   # Safe range for image colors (pairs 4-5000)
-_SEARCH_PAIR_START = 5001  # Reserved pairs 5001-5050 for search highlighting  
-_SYNTAX_COLOR_PAIRS = {}  # Dedicated cache for syntax highlighting pairs
-_SYNTAX_PAIR_START = 5051  # Reserve pairs 5051-5100 for syntax highlighting
-_UI_PAIR_START = 5101     # Reserve pairs 5101+ for loading messages etc.
+_MAX_COLOR_PAIRS = 32000   # Safe limit - most terminals support 32768 or 65536
+_SEARCH_PAIR_START = 32001  # Reserved pairs for search highlighting  
+# Syntax highlighting pairs are now allocated dynamically
+# All pairs are now allocated dynamically from the same pool
 
 def get_ui_color_pair(purpose="loading"):
     """Get a dedicated color pair for UI elements like loading messages."""
-    global _UI_PAIR_START
     try:
         if purpose == "loading":
-            pair_id = _UI_PAIR_START
             # Use predefined color pairs to avoid conflicts
             return 1  # Default color pair (reliable)
         return 1  # Fallback to default
@@ -3584,42 +3581,10 @@ def get_ui_color_pair(purpose="loading"):
         return 1  # Safe fallback
 
 def init_syntax_color_pairs():
-    """Pre-allocate color pairs for syntax highlighting in reserved range."""
-    global _SYNTAX_COLOR_PAIRS
-    
-    # Define syntax highlighting colors - work well on any background
-    syntax_colors = [
-        (255, 100, 100),  # Red for keywords
-        (100, 255, 100),  # Green for strings  
-        (200, 200, 200),  # Light gray for punctuation
-        (150, 150, 150),  # Gray for comments
-        (255, 255, 100),  # Yellow for classes
-        (100, 200, 255),  # Blue for functions
-        (200, 100, 255),  # Purple for builtins
-        (255, 150, 100),  # Orange for numbers
-    ]
-    
-    # Pre-allocate these colors in the reserved range (5001-5050)
-    pair_id = _SYNTAX_PAIR_START
-    for color in syntax_colors:
-        if COLORSUPPORT and pair_id <= _SYNTAX_PAIR_START + 50:
-            try:
-                # Convert to color indices
-                fg_color = find_closest_palette_color(color)
-                
-                fg_idx = rgb_to_color_index(*fg_color)
-                bg_idx = -1  # Use default terminal background
-                
-                # Validate indices
-                if fg_idx < 0 or fg_idx > 255: 
-                    continue
-                    
-                # Initialize the pair in the reserved range
-                curses.init_pair(pair_id, fg_idx, bg_idx)
-                _SYNTAX_COLOR_PAIRS[color] = pair_id
-                pair_id += 1
-            except (curses.error, ValueError):
-                continue
+    """Pre-allocate color pairs for syntax highlighting."""
+    # Syntax highlighting pairs are now allocated dynamically as needed
+    # No pre-allocation required
+    pass
 
 def init_smart_color_palette():
     """Initialize a smart color palette with commonly used colors."""
@@ -3761,9 +3726,9 @@ def get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True):
     fg_idx = rgb_to_color_index(*fg_color) if fg_color else -1
     bg_idx = rgb_to_color_index(*bg_color) if bg_color else -1
     
-    # Validate indices
-    if fg_idx < 0 or fg_idx > 255: fg_idx = 7
-    if bg_idx < 0 or bg_idx > 255: bg_idx = 0
+    # Validate and adjust indices
+    if fg_idx < -1 or fg_idx > 255: fg_idx = 7  # Default to white
+    if bg_idx < -1 or bg_idx > 255: bg_idx = 0  # Default to black
     
     # Check if we already have this pair
     key = (fg_idx, bg_idx)
@@ -3802,13 +3767,8 @@ def get_syntax_color_pair(color, bg_color=None):
                  tuple(bg_color) if isinstance(bg_color, (list, tuple)) else bg_color)
     
     # Try to find exact match in pre-allocated pairs
-    if cache_key in _SYNTAX_COLOR_PAIRS:
-        return _SYNTAX_COLOR_PAIRS[cache_key]
-    
-    # Fall back to regular color pair system with specified background
+    # Just get a color pair dynamically
     pair = get_color_pair(color, bg_color)
-    if pair > 0:
-        _SYNTAX_COLOR_PAIRS[cache_key] = pair
     return pair
 
 def get_color_pair(fg_color, bg_color=None):
@@ -4756,7 +4716,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                                     is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
                                                     
                                                     # Try to create a search highlight color pair
-                                                    search_color_pair = _SEARCH_PAIR_START  # Use high pair number to avoid conflicts
+                                                    search_color_pair = 10  # Use a low reserved pair for search  # Use high pair number to avoid conflicts
                                                     
                                                     if is_light_scheme:
                                                         # Light mode: bright white text on black background
@@ -5541,8 +5501,11 @@ def preread(stdscr, file):
         # Pre-allocate syntax highlighting color pairs
         init_syntax_color_pairs()
         
-    except:
-        COLORSUPPORT  = False
+    except Exception as e:
+        # Debug: show what went wrong
+        import sys
+        print(f"Color initialization failed: {e}", file=sys.stderr)
+        COLORSUPPORT = False
 
     stdscr.keypad(True)
     curses.curs_set(0)
