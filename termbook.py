@@ -39,7 +39,7 @@ Key Binding:
 
 
 __version__ = "1.1.1"
-__build_time__ = "2025-08-25 21:44:41"
+__build_time__ = "2025-08-26 02:56:27"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -72,6 +72,12 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+try:
+    from fabulous import image as fabulous_image
+    FABULOUS_AVAILABLE = True
+except ImportError:
+    FABULOUS_AVAILABLE = False
 
 try:
     from pygments import highlight
@@ -1445,63 +1451,59 @@ class HTMLtoLines(HTMLParser):
         # Format: (dark_theme_color, light_theme_color)
         # For light theme, we use darker, more saturated colors for better contrast
         token_colors_dual = {
-            'Keyword': ((0, 150, 255), (0, 50, 200)),           # Blue: bright for dark, dark for light
             'Keyword.Constant': ((0, 150, 255), (0, 50, 200)),
-            'Keyword.Declaration': ((0, 150, 255), (0, 50, 200)), 
+            'Keyword.Declaration': ((0, 150, 255), (0, 50, 200)),
             'Keyword.Namespace': ((0, 150, 255), (0, 50, 200)),
             'Keyword.Pseudo': ((0, 150, 255), (0, 50, 200)),
             'Keyword.Reserved': ((0, 150, 255), (0, 50, 200)),
-            'Keyword.Type': ((100, 200, 255), (0, 100, 180)),    # Type keywords
+            'Keyword.Type': ((100, 200, 255), (0, 100, 180)),
+            'Keyword': ((0, 150, 255), (0, 50, 200)),
             
-            'Name.Class': ((255, 255, 0), (180, 140, 0)),        # Yellow: bright for dark, dark gold for light
-            'Name.Function': ((255, 255, 0), (180, 140, 0)),     # Functions
-            'Name.Builtin': ((255, 100, 255), (150, 0, 150)),    # Magenta: bright for dark, dark purple for light
-            'Name.Exception': ((255, 100, 0), (200, 50, 0)),     # Orange: bright for dark, dark orange for light
+            'Name.Class': ((255, 255, 0), (180, 140, 0)),
+            'Name.Function': ((255, 255, 0), (180, 140, 0)),
+            'Name.Builtin': ((255, 100, 255), (150, 0, 150)),
+            'Name.Exception': ((255, 100, 0), (200, 50, 0)),
             
-            'Literal.String': ((0, 255, 0), (0, 140, 0)),        # Green: bright for dark, dark green for light
             'Literal.String.Double': ((0, 255, 0), (0, 140, 0)),
             'Literal.String.Single': ((0, 255, 0), (0, 140, 0)),
-            'Literal.Number': ((255, 165, 0), (180, 90, 0)),     # Orange numbers
+            'Literal.String': ((0, 255, 0), (0, 140, 0)),
             'Literal.Number.Integer': ((255, 165, 0), (180, 90, 0)),
             'Literal.Number.Float': ((255, 165, 0), (180, 90, 0)),
+            'Literal.Number': ((255, 165, 0), (180, 90, 0)),
             
-            'Comment': ((128, 128, 128), (100, 100, 100)),         # Gray for comments
             'Comment.Single': ((128, 128, 128), (100, 100, 100)),
             'Comment.Multiline': ((128, 128, 128), (100, 100, 100)),
-            'Comment.Preproc': ((255, 255, 255), (50, 50, 50)),  # White/dark for preprocessor
+            'Comment.Preproc': ((255, 255, 255), (50, 50, 50)),
+            'Comment': ((128, 128, 128), (100, 100, 100)),
             
-            'Operator': ((255, 100, 255), (150, 0, 150)),       # Magenta for operators like =, +, -
-            'Operator.Word': ((255, 100, 255), (150, 0, 150)),   # instanceof, typeof, etc.
-            'Punctuation': ((255, 255, 0), (180, 140, 0)),      # Yellow for punctuation like {}, (), ;
-            'Punctuation.Bracket': ((255, 255, 0), (180, 140, 0)), # Brackets specifically
+            'Operator.Word': ((255, 100, 255), (150, 0, 150)),
+            'Operator': ((255, 100, 255), (150, 0, 150)),
+            'Punctuation.Bracket': ((255, 255, 0), (180, 140, 0)),
+            'Punctuation': ((255, 255, 0), (180, 140, 0)),
             
             # XML-specific token types
-            'Name.Tag': ((0, 150, 255), (0, 50, 200)),           # Blue for XML tags
-            'Name.Attribute': ((255, 255, 0), (180, 140, 0)),     # Yellow for XML attributes  
-            'Literal.String.Doc': ((0, 255, 0), (0, 140, 0)),   # Green for XML content
-            'Generic.Emph': ((255, 255, 255), (50, 50, 50)),     # White/dark for emphasized
-            'Generic.Strong': ((255, 255, 255), (50, 50, 50)),   # White/dark for strong
-            'Text': ((255, 255, 255), (50, 50, 50)),             # White/dark for plain text
-            'Text.Whitespace': ((255, 255, 255), (50, 50, 50)),  # White/dark for whitespace
+            'Name.Tag': ((0, 150, 255), (0, 50, 200)),
+            'Name.Attribute': ((255, 255, 0), (180, 140, 0)),
+            'Literal.String.Doc': ((0, 255, 0), (0, 140, 0)),
+            'Generic.Emph': ((255, 255, 255), (50, 50, 50)),
+            'Generic.Strong': ((255, 255, 255), (50, 50, 50)),
             
             # TypeScript/JavaScript-specific tokens
-            'Name.Other': ((0, 255, 255), (0, 150, 150)),        # Variable names and identifiers (cyan)
-            'Name.Variable': ((0, 255, 255), (0, 150, 150)),     # Variable names (cyan)
-            'Name.Property': ((255, 255, 0), (180, 140, 0)),     # Object properties (yellow)
-            'Name.Constant': ((255, 165, 0), (180, 90, 0)),      # Constants
-            'Name.Builtin.Pseudo': ((255, 100, 255), (150, 0, 150)), # this, super, etc.
-            'Keyword.Declaration': ((0, 150, 255), (0, 50, 200)), # let, const, var, interface
-            'Keyword.Reserved': ((0, 150, 255), (0, 50, 200)),   # Reserved keywords
-            'Operator.Word': ((255, 100, 255), (150, 0, 150)),   # instanceof, typeof, etc.
-            'Name.Decorator': ((255, 100, 255), (150, 0, 150)),  # Decorators (@override, etc.)
-            'Literal.String.Backtick': ((0, 255, 0), (0, 140, 0)), # Template literals
-            'Literal.String.Interpol': ((255, 255, 0), (180, 140, 0)), # String interpolation
-            'Literal.Number.Bin': ((255, 165, 0), (180, 90, 0)), # Binary numbers
-            'Literal.Number.Hex': ((255, 165, 0), (180, 90, 0)), # Hexadecimal numbers
-            'Literal.Number.Oct': ((255, 165, 0), (180, 90, 0)), # Octal numbers
+            'Name.Other': ((0, 255, 255), (0, 150, 150)),
+            'Name.Variable': ((0, 255, 255), (0, 150, 150)),
+            'Name.Property': ((255, 255, 0), (180, 140, 0)),
+            'Name.Constant': ((255, 165, 0), (180, 90, 0)),
+            'Name.Builtin.Pseudo': ((255, 100, 255), (150, 0, 150)),
+            'Name.Decorator': ((255, 100, 255), (150, 0, 150)),
+            'Literal.String.Backtick': ((0, 255, 0), (0, 140, 0)),
+            'Literal.String.Interpol': ((255, 255, 0), (180, 140, 0)),
+            'Literal.Number.Bin': ((255, 165, 0), (180, 90, 0)),
+            'Literal.Number.Hex': ((255, 165, 0), (180, 90, 0)),
+            'Literal.Number.Oct': ((255, 165, 0), (180, 90, 0)),
             
             # Special tokens
-            'Error': ((255, 0, 0), (200, 0, 0)),                 # Error tokens (bright red)
+            'Error': ((255, 0, 0), (200, 0, 0)),
+            'Text': ((255, 255, 255), (50, 50, 50)),
         }
         
         # Convert token type to string and find best match
@@ -1516,9 +1518,10 @@ class HTMLtoLines(HTMLParser):
             return token_colors_dual[token_str]
         
         # Try partial matches (e.g., "Name.Function.Magic" -> "Name.Function")
-        for pattern, color in token_colors_dual.items():
+        # Sort keys by length descending to match most specific first
+        for pattern in sorted(token_colors_dual.keys(), key=len, reverse=True):
             if token_str.startswith(pattern):
-                return color
+                return token_colors_dual[pattern]
         
         # Default to white for dark theme, dark gray for light theme
         return ((255, 255, 255), (50, 50, 50))
@@ -1922,6 +1925,23 @@ def check_images_in_visible_area(src_lines, y, rows):
             return True
     return False
 
+
+def get_visible_images(src_lines, src_imgs, src_img_alts, y, rows):
+    """Get a list of images visible in the current viewport."""
+    import re
+    visible_imgs = []
+    visible_img_alts = []
+    
+    for line in src_lines[y:y+rows]:
+        match = re.search(r'\[IMG:(\d+)\]', line)
+        if match:
+            img_idx = int(match.group(1))
+            if img_idx < len(src_imgs):
+                visible_imgs.append(src_imgs[img_idx])
+                visible_img_alts.append(src_img_alts[img_idx])
+                
+    return visible_imgs, visible_img_alts
+
 def extract_figure_number(text):
     """Extract figure number from text like 'Figure 1.2', 'Fig 3', etc."""
     if not text:
@@ -2090,6 +2110,11 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
     try:
         with open('/tmp/termbook_debug.log', 'a') as f:
             f.write(f"get_visible_images called with y={y}, rows={rows}, total_lines={len(src_lines)}\n")
+            f.write(f"image_line_map length={len(image_line_map) if image_line_map else 0}, imgs length={len(imgs)}\n")
+            f.write(f"image_line_map type: {type(image_line_map)}\n")
+            if image_line_map:
+                viewport_map = image_line_map[viewport_start:viewport_end] if viewport_start < len(image_line_map) else []
+                f.write(f"viewport image mapping: {viewport_map}\n")
     except:
         pass
     
@@ -2111,16 +2136,48 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
         pass
     
     # Use precise image line mapping if available
-    if image_line_map and len(image_line_map) == len(src_lines):
+    try:
+        with open('/tmp/termbook_debug.log', 'a') as f:
+            f.write(f"Checking image_line_map: exists={image_line_map is not None}, len_match={len(image_line_map) == len(src_lines) if image_line_map else False}\n")
+            if image_line_map:
+                f.write(f"Length difference: image_line_map={len(image_line_map)}, src_lines={len(src_lines)}, diff={len(image_line_map) - len(src_lines)}\n")
+    except:
+        pass
+        
+    # Relax the length matching - allow small differences due to processing variations
+    if image_line_map and abs(len(image_line_map) - len(src_lines)) <= 10:
         # Scan visible lines and check image mapping
+        try:
+            with open('/tmp/termbook_debug.log', 'a') as f:
+                f.write(f"Using image_line_map method\n")
+        except:
+            pass
+            
         for line_num in range(viewport_start, viewport_end):
             if line_num < len(image_line_map):
                 img_idx = image_line_map[line_num]
+                try:
+                    with open('/tmp/termbook_debug.log', 'a') as f:
+                        f.write(f"  Line {line_num}: img_idx = {img_idx}\n")
+                except:
+                    pass
+                    
                 if img_idx is not None and img_idx < len(imgs) and img_idx not in seen_indices:
                     visible_images.append((imgs[img_idx], line_num, img_idx))
                     seen_indices.add(img_idx)
+                    try:
+                        with open('/tmp/termbook_debug.log', 'a') as f:
+                            f.write(f"    Found mapped image: {imgs[img_idx]} at line {line_num}\n")
+                    except:
+                        pass
     else:
         # Fallback to old method - scan for image markers
+        try:
+            with open('/tmp/termbook_debug.log', 'a') as f:
+                f.write(f"Using fallback search method\n")
+        except:
+            pass
+            
         for line_num in range(viewport_start, viewport_end):
             if line_num >= len(src_lines):
                 break
@@ -2148,17 +2205,15 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
                 # Without mapping, we can't determine which specific image this is
                 pass
         
-        # If we found IMG_LINE markers but no [IMG:n] markers, return all images
-        has_rendered_images = any(
-            src_lines[i].startswith("IMG_LINE:") 
-            for i in range(viewport_start, viewport_end) 
-            if i < len(src_lines)
-        )
-        
-        if has_rendered_images and not visible_images and imgs:
-            for img_idx, img_path in enumerate(imgs):
-                if img_idx not in seen_indices:
-                    visible_images.append((img_path, y, img_idx))
+        # If we found IMG_LINE markers but no [IMG:n] markers, try to identify which images
+        # are visible by checking which IMG_LINE markers are in the viewport
+        if not visible_images and imgs:
+            # Look for IMG_LINE markers in viewport and try to determine which images they belong to
+            for line_num in range(viewport_start, viewport_end):
+                if line_num < len(src_lines) and src_lines[line_num].startswith("IMG_LINE:"):
+                    # Without proper mapping, we can't determine which specific image this is
+                    # So we don't add anything to avoid returning all chapter images
+                    pass
     
     # Sort by line position
     visible_images.sort(key=lambda x: x[1])
@@ -3333,8 +3388,10 @@ def open_media(scr, epub, src):
             max_width = min(cols - 4, 100)
             max_height = rows - 4
             
-            # Always use 24-bit color with horizontal slab characters
-            color_lines = render_image_with_quarter_blocks(img, max_width, max_height)
+            # Use Fabulous for improved image rendering, with fallback to quarter blocks
+            color_lines = render_image_with_fabulous(img, max_width, max_height)
+            if not color_lines:  # Fallback if Fabulous fails
+                color_lines = render_image_with_quarter_blocks(img, max_width, max_height)
             
             # Temporarily exit curses mode to display with full color
             curses.endwin()
@@ -3859,6 +3916,191 @@ def supports_24bit_color():
     return True
 
 
+def render_image_with_fabulous(img_data, max_width, max_height):
+    """Render image using Fabulous library for improved color handling."""
+    if not FABULOUS_AVAILABLE:
+        return []
+    
+    try:
+        # Save image data to temporary file since Fabulous requires a file path
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            # Convert PIL image to bytes if needed
+            if hasattr(img_data, 'save'):
+                img_data.save(tmp.name, format='PNG')
+            else:
+                # img_data is already bytes
+                tmp.write(img_data)
+            temp_path = tmp.name
+        
+        # Use Fabulous to render the image
+        fab_img = fabulous_image.Image(temp_path, max_width)
+        
+        # Convert to string and split into lines
+        img_str = str(fab_img)
+        color_lines = img_str.split('\n')
+        
+        # Return the raw lines - process_fabulous_line will handle them
+        processed_lines = [line for line in color_lines if line.strip()]
+        
+        # Clean up temporary file
+        os.unlink(temp_path)
+        
+        return processed_lines
+        
+    except Exception as e:
+        # Fall back to quarter blocks if Fabulous fails
+        if hasattr(img_data, 'save'):
+            return render_image_with_quarter_blocks(img_data, max_width, max_height)
+        else:
+            # Convert bytes to PIL Image for fallback
+            try:
+                from PIL import Image
+                img = Image.open(BytesIO(img_data))
+                return render_image_with_quarter_blocks(img, max_width, max_height)
+            except:
+                return []
+
+
+def detect_and_convert_escape_sequences(text):
+    """Detect ANSI escape sequences and convert them for terminal display."""
+    import re
+    
+    # Pattern to match ANSI color escape sequences
+    ansi_pattern = r'\[(\d+(?:;\d+)*)?m'
+    
+    # Find all ANSI escape sequences
+    matches = list(re.finditer(ansi_pattern, text))
+    
+    if not matches:
+        return text
+    
+    # Convert sequences while preserving the original text structure
+    result = text
+    
+    # Process common Fabulous color codes
+    # Fabulous uses format [48;5;NUMm for background colors
+    # and [38;5;NUMm for foreground colors
+    
+    # Replace with proper ANSI codes
+    result = re.sub(r'\[48;5;(\d+)m', r'\033[48;5;\1m', result)  # Background colors
+    result = re.sub(r'\[38;5;(\d+)m', r'\033[38;5;\1m', result)  # Foreground colors  
+    result = re.sub(r'\[49m', r'\033[49m', result)  # Reset background
+    result = re.sub(r'\[39m', r'\033[39m', result)  # Reset foreground
+    result = re.sub(r'\[0m', r'\033[0m', result)   # Reset all
+    
+    return result
+
+
+def process_fabulous_line(fab_line, max_width):
+    """Process a line from Fabulous output, extracting colors and preparing for display."""
+    import re
+    
+    # Fabulous uses spaces with background colors to create blocks
+    # We need to convert these to block characters with proper colors
+    
+    line_chars = []
+    line_colors = []
+    current_fg = (255, 255, 255)  # Default white
+    current_bg = (0, 0, 0)        # Default black
+    
+    # Parse the raw Fabulous output directly
+    i = 0
+    while i < len(fab_line):
+        if fab_line[i:i+1] == '\033' or fab_line[i:i+1] == '[':
+            # Find the end of the escape sequence
+            if fab_line[i:i+1] == '\033':
+                start = i + 1
+            else:
+                start = i
+            
+            end = fab_line.find('m', start)
+            if end != -1:
+                # Extract the escape sequence
+                if fab_line[i:i+1] == '\033':
+                    seq = fab_line[i+2:end]  # Skip '\033['
+                else:
+                    seq = fab_line[i+1:end] if fab_line[i:i+1] == '[' else fab_line[start:end]
+                
+                # Parse color codes
+                if '48;5;' in seq:  # Background color
+                    parts = seq.split(';')
+                    if len(parts) >= 3:
+                        try:
+                            color_index = int(parts[2])
+                            current_bg = ansi_256_to_rgb(color_index)
+                        except (ValueError, IndexError):
+                            pass
+                elif '38;5;' in seq:  # Foreground color
+                    parts = seq.split(';')
+                    if len(parts) >= 3:
+                        try:
+                            color_index = int(parts[2])
+                            current_fg = ansi_256_to_rgb(color_index)
+                        except (ValueError, IndexError):
+                            pass
+                elif seq in ['49', '0']:  # Reset background or all
+                    current_bg = (0, 0, 0)
+                    if seq == '0':
+                        current_fg = (255, 255, 255)
+                
+                i = end + 1
+            else:
+                i += 1
+        else:
+            # Regular character - if it's a space with bg color, convert to block
+            char = fab_line[i]
+            if char == ' ' and current_bg != (0, 0, 0):
+                # Use a full block character instead of space for visibility
+                line_chars.append('█')
+                line_colors.append((current_bg, current_bg))  # Both fg and bg same color for solid block
+            elif char == ' ':
+                line_chars.append(' ')
+                line_colors.append((current_fg, current_bg))
+            else:
+                line_chars.append(char)
+                line_colors.append((current_fg, current_bg))
+            i += 1
+    
+    # Create the final display line
+    display_line = ''.join(line_chars)
+    
+    # Center the line and pad colors
+    padding_needed = max(0, (max_width - len(display_line)) // 2)
+    padded_line = " " * padding_needed + display_line
+    padded_colors = [((0, 0, 0), (0, 0, 0))] * padding_needed + line_colors
+    
+    return padded_line, padded_colors
+
+
+def ansi_256_to_rgb(color_index):
+    """Convert ANSI 256 color index to RGB tuple."""
+    # Standard 16 colors
+    if color_index < 16:
+        standard_colors = [
+            (0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0),
+            (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192),
+            (128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0),
+            (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255)
+        ]
+        return standard_colors[color_index]
+    
+    # 216 color cube (colors 16-231)
+    elif color_index < 232:
+        color_index -= 16
+        r = (color_index // 36) * 51
+        g = ((color_index % 36) // 6) * 51
+        b = (color_index % 6) * 51
+        return (r, g, b)
+    
+    # Grayscale (colors 232-255)
+    else:
+        gray = (color_index - 232) * 10 + 8
+        return (gray, gray, gray)
+
+
 def render_image_with_quarter_blocks(img, max_width, max_height):
     """Render image using horizontal slab character (▀) with 24-bit color foreground and background."""
     if img.mode != 'RGB':
@@ -4202,122 +4444,65 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                         # only to near-gray colors, leaving saturated colors unchanged
                         saturation_boost = 1.5  # This value is only applied to pale colors
                     
-                    # Keep original image for high-quality oversampling
-                    orig_img = img.copy()
-                    orig_w, orig_h = orig_img.size
-                    
-                    # Calculate target dimensions
-                    target_width = target_pixel_width
-                    target_height = target_pixel_height
-                    
-                    # Ensure height is even for proper half-block pairing
-                    if target_height % 2 != 0:
-                        target_height += 1
-                    
-                    # Calculate sampling regions for each output pixel
-                    x_scale = orig_w / target_width
-                    y_scale = orig_h / target_height
-                    
-                    # Unicode quarter-block characters for 2x2 pixel mapping
-                    blocks = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█']
-                    
-                    # Store color and character info for each line with oversampling
-                    for y in range(0, target_height, 2):  # Process 2 rows at a time (proper half-block technique)
-                        line = ""
-                        line_colors = []
+                    # Try to use Fabulous for better image rendering
+                    try:
+                        # Use Fabulous to render the image
+                        fabulous_lines = render_image_with_fabulous(img, char_width, char_height // 2)
                         
-                        # Process each column of pixels with oversampling from original
-                        for x in range(target_width):
-                            # Calculate source region in original image for this output pixel
-                            src_x_start = int(x * x_scale)
-                            src_x_end = max(src_x_start + 1, int((x + 1) * x_scale))
-                            src_y_top_start = int(y * y_scale)
-                            src_y_top_end = max(src_y_top_start + 1, int((y + 1) * y_scale))
-                            src_y_bot_start = int((y + 1) * y_scale)
-                            src_y_bot_end = max(src_y_bot_start + 1, int(min((y + 2) * y_scale, orig_h)))
-                            
-                            # Scattergun sampling for much better performance
-                            import random
-                            top_samples = []
-                            num_samples = 16  # Much fewer samples than 8x8=64, but randomly distributed
-                            
-                            # Set seed for consistent results per pixel coordinate
-                            random.seed(x + y * 10000)
-                            
-                            for _ in range(num_samples):
-                                # Random position within top half region
-                                random_x = random.uniform(0, 1)
-                                random_y = random.uniform(0, 1)
+                        if fabulous_lines:
+                            # Process Fabulous output
+                            for fab_line in fabulous_lines:
+                                # Convert escape sequences to displayable format and extract colors
+                                processed_line, line_colors = process_fabulous_line(fab_line, max_width)
                                 
-                                precise_x = src_x_start + (random_x * (src_x_end - src_x_start))
-                                precise_y = src_y_top_start + (random_y * (src_y_top_end - src_y_top_start))
+                                # Add the line to output
+                                new_lines.append("IMG_LINE:" + processed_line)
+                                image_info.append(line_colors)
+                                image_line_map.append(img_idx)  # Track which image this line belongs to
+                        else:
+                            raise Exception("Fabulous rendering failed")
+                            
+                    except Exception as e:
+                        # Fallback to original pixel processing if Fabulous fails
+                        # Keep original image for high-quality oversampling
+                        orig_img = img.copy()
+                        orig_w, orig_h = orig_img.size
+                        
+                        # Calculate target dimensions
+                        target_width = target_pixel_width
+                        target_height = target_pixel_height
+                        
+                        # Ensure height is even for proper half-block pairing
+                        if target_height % 2 != 0:
+                            target_height += 1
+                        
+                        # Store color and character info for each line with simple fallback
+                        for y in range(0, target_height, 2):  # Process 2 rows at a time
+                            line = ""
+                            line_colors = []
+                            
+                            # Simple fallback processing
+                            for x in range(target_width):
+                                # Simple pixel sampling
+                                src_x = min(int(x * orig_w / target_width), orig_w - 1)
+                                src_y_top = min(int(y * orig_h / target_height), orig_h - 1)
+                                src_y_bot = min(int((y + 1) * orig_h / target_height), orig_h - 1)
                                 
-                                # Convert to integer for pixel access, with bounds checking
-                                pixel_x = min(int(precise_x), orig_w - 1)
-                                pixel_y = min(int(precise_y), orig_h - 1)
+                                top_pixel = orig_img.getpixel((src_x, src_y_top))
+                                bottom_pixel = orig_img.getpixel((src_x, src_y_bot))
                                 
-                                if pixel_x >= 0 and pixel_y >= 0:
-                                    top_samples.append(orig_img.getpixel((pixel_x, pixel_y)))
-                            
-                            # Scattergun sampling for bottom half region
-                            bottom_samples = []
-                            
-                            for _ in range(num_samples):
-                                # Random position within bottom half region  
-                                random_x = random.uniform(0, 1)
-                                random_y = random.uniform(0, 1)
-                                
-                                precise_x = src_x_start + (random_x * (src_x_end - src_x_start))
-                                precise_y = src_y_bot_start + (random_y * (src_y_bot_end - src_y_bot_start))
-                                
-                                # Convert to integer for pixel access, with bounds checking
-                                pixel_x = min(int(precise_x), orig_w - 1)
-                                pixel_y = min(int(precise_y), orig_h - 1)
-                                
-                                if pixel_x >= 0 and pixel_y >= 0:
-                                    bottom_samples.append(orig_img.getpixel((pixel_x, pixel_y)))
-                            
-                            # Average the samples for smoother colors
-                            if top_samples:
-                                top_pixel = tuple(sum(c[i] for c in top_samples) // len(top_samples) for i in range(3))
-                            else:
-                                top_pixel = (0, 0, 0)
-                                
-                            if bottom_samples:
-                                bottom_pixel = tuple(sum(c[i] for c in bottom_samples) // len(bottom_samples) for i in range(3))
-                            else:
-                                bottom_pixel = (0, 0, 0)
-                            
-                            # Apply saturation boost if needed (only for colorful images)
-                            if saturation_boost > 1.0:
-                                top_pixel = boost_color_saturation(*top_pixel, saturation_boost)
-                                bottom_pixel = boost_color_saturation(*bottom_pixel, saturation_boost)
-                            
-                            # Ensure colors are valid
-                            fg_color = tuple(max(0, min(255, c)) for c in top_pixel)
-                            bg_color = tuple(max(0, min(255, c)) for c in bottom_pixel)
-                            
-                            # Use smart color system with potential slab reversal
-                            color_pair, use_reversed = get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True)
-                            
-                            if use_reversed:
-                                # Use lower slab (▄) with reversed colors  
-                                line += '▄'
-                                line_colors.append((bg_color, fg_color))  # Colors are swapped for the reversal
-                            else:
-                                # Use upper slab (▀) with normal colors
+                                # Use upper slab character
                                 line += '▀'
-                                line_colors.append((fg_color, bg_color))
-                        
-                        # Add the line to output
-                        padding = " " * ((max_width - len(line)) // 2)
-                        centered_line = padding + line
-                        padded_colors = [((0, 0, 0), (0, 0, 0))] * len(padding) + line_colors
-                        
-                        # Add each line once (no repetition - half-block technique handles vertical resolution)
-                        new_lines.append("IMG_LINE:" + centered_line)
-                        image_info.append(padded_colors)
-                        image_line_map.append(img_idx)  # Track which image this line belongs to
+                                line_colors.append((top_pixel, bottom_pixel))
+                            
+                            # Add the line to output
+                            padding = " " * ((max_width - len(line)) // 2)
+                            centered_line = padding + line
+                            padded_colors = [((0, 0, 0), (0, 0, 0))] * len(padding) + line_colors
+                            
+                            new_lines.append("IMG_LINE:" + centered_line)
+                            image_info.append(padded_colors)
+                            image_line_map.append(img_idx)  # Track which image this line belongs to
                     
                     new_lines.append("")  # Empty line after image
                     image_line_map.append(None)  # Empty line doesn't belong to any image
@@ -5288,67 +5473,72 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                 pad.refresh(y,0, 0,x, rows-1,x+width)
                             except curses.error:
                                 pass
-            elif k == ord("i"):  # Open image
-                # Find only images that are visible or overlapping with current viewport
-                import re
-                import subprocess
-                import tempfile
+            elif k == ord("i"):
+                # DEBUG: Log that 'i' key was pressed
+                try:
+                    with open('/tmp/termbook_debug.log', 'a') as f:
+                        f.write(f"'i' key pressed! y={y}, rows={rows}\n")
+                except:
+                    pass
                 
-                # Get visible/overlapping images instead of all chapter images
                 visible_images = get_visible_images(src_lines, imgs, y, rows, image_line_map)
+                
+                # DEBUG: Log what get_visible_images returned
+                try:
+                    with open('/tmp/termbook_debug.log', 'a') as f:
+                        f.write(f"get_visible_images returned: {len(visible_images)} images\n")
+                        for i, (img_path, line_num, img_idx) in enumerate(visible_images):
+                            f.write(f"  Image {i}: {img_path} at line {line_num}\n")
+                except:
+                    pass
                 
                 if visible_images:
                     if len(visible_images) == 1:
-                        # Single image found, open it directly
+                        # Single image, open directly
                         img_path = visible_images[0][0]
-                        open_image_in_system_viewer(ebook, chpath, img_path)
+                        success = open_image_in_system_viewer(ebook, chpath, img_path)
+                        if not success:
+                            # Show error message
+                            stdscr.addstr(rows-1, 0, " Could not open image ", curses.A_REVERSE)
+                            stdscr.refresh()
+                            curses.napms(1500)
                     else:
-                        # Multiple images found, show simple text list to choose from
-                        # Build list of image descriptions with filename, alt, caption, figure info
-                        image_choices = []
-                        for i, (img_path, line_num, img_idx) in enumerate(visible_images):
-                            # Get enhanced label with all available info
-                            label = get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, line_num)
-                            
-                            # DEBUG: Log what's happening
-                            try:
-                                with open('/tmp/termbook_debug.log', 'a') as f:
-                                    f.write(f"DEBUG: Image {i}: {img_path}\n")
-                                    f.write(f"  line_num: {line_num}, img_idx: {img_idx}\n")
-                                    f.write(f"  label: '{label}'\n")
-                                    f.write(f"  img_alts[{img_idx}]: '{img_alts[img_idx] if img_idx < len(img_alts) else 'OUT_OF_RANGE'}'\n")
-                            except:
-                                pass
-                            
-                            # Add filename for clarity
-                            filename = os.path.basename(img_path)
-                            full_desc = f"{filename}"
-                            if label and label != filename:
-                                full_desc += f" - {label}"
-                            
-                            image_choices.append(full_desc)
+                        # Multiple images, show selection
+                        stdscr.clear()
+                        stdscr.addstr(0, 0, f"Found {len(visible_images)} images. Select one to open:")
+                        for i, (img_path, line_num, img_idx) in enumerate(visible_images[:9]):
+                            display_name = os.path.basename(img_path) if img_path else f"Image {img_idx + 1}"
+                            if len(display_name) > 60:
+                                display_name = display_name[:57] + "..."
+                            stdscr.addstr(i + 2, 0, f"{i+1}. {display_name}")
                         
-                        # Show selection dialog
-                        selected = selection_dialog(stdscr, "Select Image to Open:", image_choices, 
-                                                  help_text="Enter: Open | q: Cancel")
+                        stdscr.addstr(len(visible_images) + 3, 0, "Press 1-9 to open an image, or any other key to cancel")
+                        stdscr.refresh()
                         
-                        if selected is not None and selected < len(visible_images):
-                            # Open selected image
-                            img_path = visible_images[selected][0]
-                            open_image_in_system_viewer(ebook, chpath, img_path)
+                        choice = stdscr.getch()
+                        if ord('1') <= choice <= ord('9') and choice - ord('1') < len(visible_images):
+                            img_path = visible_images[choice - ord('1')][0]
+                            success = open_image_in_system_viewer(ebook, chpath, img_path)
+                            if not success:
+                                stdscr.addstr(rows-1, 0, " Could not open image ", curses.A_REVERSE)
+                                stdscr.refresh()
+                                curses.napms(1500)
+                    
+                    # Redraw screen after external program closes
+                    stdscr.clear()
+                    stdscr.refresh()
                 else:
-                    # No visible images found - show brief message
-                    stdscr.addstr(rows - 1, 0, " No images visible on this screen ", curses.A_REVERSE)
-                    stdscr.refresh()
-                    curses.napms(1500)  # Show for 1.5 seconds
-                    # Clear the message
-                    stdscr.addstr(rows - 1, 0, " " * min(35, cols))
-                    stdscr.refresh()
-                    # Redraw content
+                    # DEBUG: No images found
                     try:
-                        pad.refresh(y,0, 0,x, rows-1,x+width)
-                    except curses.error:
+                        with open('/tmp/termbook_debug.log', 'a') as f:
+                            f.write(f"No visible images found.\n")
+                    except:
                         pass
+                    
+                    # Show message to user
+                    stdscr.addstr(rows-1, 0, " No images visible in current view ", curses.A_REVERSE)
+                    stdscr.refresh()
+                    curses.napms(1500)
             elif k == COLORSWITCH and COLORSUPPORT:
                 # Simple cycling: 1->2->3->1 (default->dark->light->default)
                 current_color = curses.pair_number(stdscr.getbkgd())
