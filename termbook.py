@@ -248,6 +248,15 @@ class HTMLtoLines(HTMLParser):
     hide = {"script", "style", "head"}
     # hide = {"script", "style", "head", ", "sub}
 
+    # Shared with detect_language()'s SQL branch, so the two "is this SQL"
+    # signals can't silently drift apart the way the Java keyword lists did
+    # (see CODE_AUDIT.md section 2.1(d) / 2.4).
+    SQL_KEYWORDS = frozenset({
+        'select', 'from', 'where', 'join', 'inner', 'left', 'right', 'outer', 'on',
+        'group', 'order', 'having', 'distinct', 'limit', 'offset', 'union', 'intersect',
+        'create', 'alter', 'drop', 'insert', 'update', 'delete', 'truncate',
+    })
+
     def __init__(self, dump_mode=False):
         HTMLParser.__init__(self)
         self.text = [""]
@@ -634,27 +643,48 @@ class HTMLtoLines(HTMLParser):
         xml_tag_count = len(re.findall(r'<[^/>][^>]*>[^<]*</[^>]+>', text))
         if xml_tag_count >= 2:
             return True
-        
+
+        # Structural short-circuits: a handful of syntactic shapes that are
+        # effectively never produced by English prose, checked before the
+        # weighted score below. Without this, the scoring's flat prose bias
+        # (prose_score starts at 20, and several of its strongest signals
+        # need 2-3+ lines to engage) meant a short, completely ordinary
+        # function -- e.g. a 1-2 line Python function, exactly the kind of
+        # thing a "Listing 3.1 shows a simple accessor" caption introduces --
+        # was classified as prose, since it never accumulated enough score
+        # to clear the threshold.
+        structural_code_patterns = (
+            r'^\s*def\s+\w+\s*\([^)]*\)\s*:',                 # Python def line
+            r'^\s*async\s+def\s+\w+\s*\([^)]*\)\s*:',         # Python async def
+            r'^\s*class\s+\w+\s*(\([^)]*\))?\s*:\s*$',        # Python class Foo(Base):
+            r'^\s*class\s+\w+[^{]*\{\s*$',                    # JS/TS/Java class Foo {
+            r'^\s*#include\s*[<"]',                           # C/C++ #include
+            r'^\s*(select|insert|update|delete)\b.*\b(from|into|set)\b',  # SQL statement
+        )
+        for line in lines:
+            for pattern in structural_code_patterns:
+                if re.match(pattern, line, re.IGNORECASE):
+                    return True
+
         code_score = 0
         prose_score = 20   # Start with reasonable prose advantage
         
-        # Strong programming keywords (unambiguous code indicators)
+        # Strong programming keywords (unambiguous code indicators). The SQL
+        # subset is shared with detect_language()'s SQL branch via
+        # SQL_KEYWORDS (see class attribute) rather than kept as a second,
+        # independently-maintained copy.
         strong_code_keywords = {
             'import', 'export', 'def', 'class', 'const', 'let', 'var', 'async', 'await',
             'yield', 'lambda', 'implements', 'interface', 'enum', 'struct', 'union',
             'public', 'private', 'protected', 'static', 'final', 'void', 'null', 'undefined',
             'extends', 'super', 'this', 'self', 'typeof', 'instanceof', 'new', 'delete',
             'throw', 'throws', 'catch', 'finally', 'try',
-            # SQL keywords (unambiguous database code)
-            'select', 'from', 'where', 'join', 'inner', 'left', 'right', 'outer', 'on',
-            'group', 'order', 'having', 'distinct', 'limit', 'offset', 'union', 'intersect',
-            'create', 'alter', 'drop', 'insert', 'update', 'delete', 'truncate',
             # Cypher/Neo4j keywords
             'match', 'merge', 'optional', 'with', 'unwind', 'return', 'skip', 'collect',
             'load', 'csv', 'headers', 'node', 'relationship', 'path', 'call', 'yield',
-            # Shell/Bash keywords  
+            # Shell/Bash keywords
             'echo', 'cd', 'ls', 'mkdir', 'chmod', 'grep', 'awk', 'sed', 'ps', 'kill'
-        }
+        } | self.SQL_KEYWORDS
         
         # Weak programming keywords (appear in both code and prose contexts)
         # Removed: 'in', 'for', 'as', 'is', 'of', 'out', 'if', 'then', 'else' - too common in English
@@ -1053,18 +1083,26 @@ class HTMLtoLines(HTMLParser):
         
         return result, index_mapping
 
+    @staticmethod
+    def _kw_present(keyword, text):
+        """Whole-word/whole-phrase substring match. Plain `in` checks (the
+        previous implementation here) match inside unrelated words too --
+        e.g. 'new ' inside 'renew ' -- which is what let a stray fragment
+        of English prose get classified as Java."""
+        return re.search(r'\b' + re.escape(keyword) + r'\b', text) is not None
+
     def detect_language(self, code_text, hint_lang=None):
         """Auto-detect programming language from code text."""
         if not PYGMENTS_AVAILABLE:
             return None
-        
+
         # Try hint first if provided
         if hint_lang:
             try:
                 return get_lexer_by_name(hint_lang)
             except ClassNotFound:
                 pass
-        
+
         # Strip "Listing X.X" prefix if present for better language detection
         cleaned_code = code_text
         if re.match(r'^Listing\s+\d+\.?\d*\s+', code_text, re.IGNORECASE):
@@ -1072,101 +1110,186 @@ class HTMLtoLines(HTMLParser):
             lines = code_text.split('\n')
             if len(lines) > 1:
                 cleaned_code = '\n'.join(lines[1:])
-        
-        # Use heuristics first for common patterns (more reliable than guess_lexer)
+
         code_lower = cleaned_code.lower().strip()
-        
-        # Java heuristics - enhanced detection
-        java_keywords = ['public class', 'private class', 'protected class', 
-                         'public interface', 'private interface',
-                         'public static', 'private static', 'protected static',
-                         'public final', 'private final', 
-                         'public synchronized', 'private synchronized',
-                         'system.out.print', 'public void', 'private void',
-                         'import java.', 'package ', '@override', '@autowired',
-                         'new ', 'extends ', 'implements ', 'throws ',
-                         'public enum', 'private enum']
-        
-        # Also check for common Java patterns (getter/setter, types)
-        java_patterns = ['getid()', 'setid(', 'getname()', 'setname(',
-                        'string ', 'integer ', 'boolean ', 'double ', 'float ',
-                        'final ', 'static final', 'return id;', 'return name;',
-                        'this.', '.equals(', '.hashcode(', '.tostring(']
-            
-        if any(keyword in code_lower for keyword in java_keywords) or \
-           any(pattern in code_lower for pattern in java_patterns):
-            try:
-                return get_lexer_by_name('java')
-            except ClassNotFound:
-                pass
-        
-        # Python heuristics  
-        elif ('def ' in code_lower or 'import ' in code_lower or 'print(' in code_lower):
-            try:
-                return get_lexer_by_name('python')
-            except ClassNotFound:
-                pass
-        
-        # TypeScript heuristics (check before JavaScript since TS is superset)
-        elif ('interface ' in code_lower or 'type ' in code_lower or 
-              ': string' in code_lower or ': number' in code_lower or ': boolean' in code_lower or
-              'public ' in code_lower or 'private ' in code_lower or 'protected ' in code_lower or
-              ': void' in code_lower or 'readonly ' in code_lower or
-              '?' in code_text or # Optional properties like email?: string
-              ('class ' in code_lower and ('public' in code_lower or 'private' in code_lower))):
-            try:
-                return get_lexer_by_name('typescript')
-            except ClassNotFound:
-                # Fall back to JavaScript if TypeScript lexer not available
-                try:
-                    return get_lexer_by_name('javascript')
-                except ClassNotFound:
-                    pass
-        
-        # JavaScript heuristics
-        elif ('function ' in code_lower or 'console.log' in code_lower or 'var ' in code_lower or 'let ' in code_lower or 'const ' in code_lower):
-            try:
-                return get_lexer_by_name('javascript')
-            except ClassNotFound:
-                pass
-        
-        # XML heuristics - prioritize XML detection
-        elif ('<?xml' in code_lower or '<!doctype' in code_lower or 
-              ('<!entity' in code_lower and '&' in code_lower and ';' in code_lower) or
-              (code_lower.count('<') >= 2 and code_lower.count('>') >= 2)):
+        kw = lambda word: self._kw_present(word, code_lower)
+
+        # Checks below are ordered from most to least language-specific, so a
+        # snippet is claimed by the first branch with genuinely distinctive
+        # evidence for it, rather than by the first branch with merely
+        # plausible-looking evidence (the earlier ordering put Java first,
+        # so any TypeScript/JavaScript class using ordinary OOP words like
+        # `this.`/`private`/`new` was claimed by Java before TS/JS ever got
+        # a chance to look at it).
+
+        # XML heuristics - checked first since a stray '?' or '<'/'>' pair
+        # used to get intercepted by later, broader branches.
+        if ('<?xml' in code_lower or '<!doctype' in code_lower or
+                ('<!entity' in code_lower and '&' in code_lower and ';' in code_lower) or
+                (code_lower.count('<') >= 2 and code_lower.count('>') >= 2)):
             try:
                 return get_lexer_by_name('xml')
             except ClassNotFound:
                 pass
-        
-        # C/C++ heuristics
+
+        # C/C++ heuristics. Note: an earlier version of this also matched a
+        # marker-free "primitive-type function(...) {" pattern (to catch
+        # bare C functions with no #include anywhere in the snippet, e.g.
+        # "int abs(int x) {"), but validating against real books surfaced
+        # genuine Java methods/classes misdetected as C through it (a
+        # package-private "void addOrderLine(...) {" method has the exact
+        # same shape and no access-modifier prefix to exclude it by). A
+        # marker-free C snippet with no #include/main/printf anywhere falls
+        # through to guess_lexer instead, same as before this rework -- a
+        # known, pre-existing gap rather than something this phase promised
+        # to close, and not worth reintroducing false Java positives for.
         elif ('#include' in code_lower or 'int main(' in code_lower or 'printf(' in code_lower):
             try:
                 return get_lexer_by_name('c')
             except ClassNotFound:
                 pass
-        
-        # Cypher heuristics (Neo4j query language)
-        elif (('create (' in code_lower or 'match (' in code_lower or 'load csv' in code_lower or 
-                   'merge (' in code_lower or 'return ' in code_lower or 'where ' in code_lower) and 
-                  ('businessobject' in code_lower or ':' in code_text or '[:' in code_text or 
-                   'neo4j' in code_lower or 'cypher' in code_lower or 'graph' in code_lower or
-                   'objectid' in code_lower or 'row.' in code_lower)):
+
+        # Python heuristics - `def`/`elif`/`lambda` as whole words are
+        # distinctive enough to check early, before any of the curly-brace
+        # languages get a chance to claim the snippet via generic overlap.
+        # Note: an earlier version of this also accepted `import` + `print`
+        # together as a weaker signal (for one-liners lacking def/elif/
+        # lambda), but validating against real books surfaced a genuine
+        # Java class misdetected as Python through it -- both words are
+        # completely ordinary in Java (import statements, print() calls)
+        # too, so that combination doesn't actually discriminate the two.
+        elif kw('def') or kw('elif') or kw('lambda'):
+            try:
+                return get_lexer_by_name('python')
+            except ClassNotFound:
+                pass
+
+        # SQL heuristics (need at least two distinctive SQL keywords together,
+        # since any single one of these words can appear in prose or in
+        # other languages' identifiers). Shares SQL_KEYWORDS with
+        # _looks_like_code's strong_code_keywords rather than keeping a
+        # second, independently-maintained word list (audit 2.1(d)/2.4).
+        elif sum(1 for word in self.SQL_KEYWORDS if kw(word)) >= 2:
+            try:
+                return get_lexer_by_name('sql')
+            except ClassNotFound:
+                pass
+
+        # Cypher heuristics (Neo4j query language). Note: the old version
+        # accepted a bare ':' anywhere in the text as supporting evidence,
+        # which matches Python type hints, JS/TS object literals, and plain
+        # prose ("at 5:00", "as follows:") -- replaced with the actual
+        # Cypher relationship-arrow/type syntax `[:` instead.
+        elif ((kw('create (') or kw('match (') or kw('load csv') or
+                   kw('merge (') or kw('return') or kw('where')) and
+                  (kw('businessobject') or '[:' in code_text or
+                   kw('neo4j') or kw('cypher') or kw('graph') or
+                   kw('objectid') or kw('row.'))):
             try:
                 return get_lexer_by_name('cypher')
             except ClassNotFound:
                 pass
-        
-        # CSV heuristics (comma-separated values)
-        elif (',' in code_text and code_text.count('\n') > 0 and 
-                  len([line for line in code_text.split('\n') if ',' in line]) >= 2):
+
+        # TypeScript heuristics (checked before JavaScript since TS is a
+        # superset). Note: the old bare `'?' in code_text` check (meant to
+        # catch optional properties like `email?: string`) matched ANY
+        # question mark anywhere, including a ternary's `? :` or an XML
+        # prolog's `?>` -- replaced with a pattern that actually requires
+        # the optional-property shape. Also removed the old bare `interface`/
+        # `enum` keyword checks and the `class + public/private` combinator:
+        # Java has `public interface`/`public enum`/`public class` too, so
+        # those signals don't distinguish TS from Java at all -- they were
+        # claiming ordinary Java (checked below) as TypeScript. The signals
+        # that remain here are TypeScript's actual, unambiguous
+        # `name: Type`-style type annotations (Java/C# put the type first:
+        # `String name`) plus `readonly`, which Java has no equivalent of
+        # (it uses `final` instead).
+        elif (kw('readonly') or
+                ': string' in code_lower or ': number' in code_lower or
+                ': boolean' in code_lower or ': void' in code_lower or
+                re.search(r'\w\?\s*:', code_text) is not None):
             try:
-                # CSV doesn't have a dedicated lexer, use text with basic highlighting
-                return get_lexer_by_name('text')
+                return get_lexer_by_name('typescript')
+            except ClassNotFound:
+                try:
+                    return get_lexer_by_name('javascript')
+                except ClassNotFound:
+                    pass
+
+        # JavaScript heuristics
+        elif (kw('function') or '=>' in code_text or 'console.log' in code_lower or
+                kw('var') or kw('let') or kw('const')):
+            try:
+                return get_lexer_by_name('javascript')
             except ClassNotFound:
                 pass
-        
-        # If heuristics didn't match, try guess_lexer as fallback
+
+        # Java heuristics - narrowed to signals that are actually
+        # Java-specific. The old list included generic OOP vocabulary
+        # (`this.`, `new `, `extends`, `private `, bare `string `/`boolean `)
+        # shared by TypeScript, JavaScript, C#, and others, and being
+        # checked first meant it claimed most curly-brace snippets
+        # regardless of which language they actually were.
+        #
+        # The dotted-import and `throws SomeException` checks were added
+        # after validating against real books: excerpted Java methods (the
+        # kind books show without their surrounding class, e.g. a single
+        # method with a `throws` clause, or with a bare `import a.b.C;`
+        # above it but no class/main/println in view) don't match any of
+        # the other signals here, and were falling through to guess_lexer,
+        # which isn't reliable on short snippets and was guessing "Python".
+        # Both shapes are distinctly Java/C#-like: TS/JS imports use
+        # `import {x} from 'y'` (braces and a quoted path, not a bare
+        # dotted identifier), and TS/JS don't declare checked-exception
+        # types in a function signature at all.
+        elif ('system.out.print' in code_lower or kw('import java.') or '@override' in code_lower or
+                '@autowired' in code_lower or
+                re.search(r'\bpublic\s+static\s+void\s+main\b', code_lower) is not None or
+                re.search(r'\b(public|private|protected)\s+(final\s+|static\s+|abstract\s+)*(class|interface|enum)\b',
+                          code_lower) is not None or
+                re.search(r'^\s*import\s+(static\s+)?[\w.]+(\.\*)?;\s*$', code_text, re.MULTILINE) is not None or
+                re.search(r'\bthrows\s+\w*(exception|error)\b', code_lower) is not None or
+                # Type-first field declaration ("String title;", "private
+                # ISBN isbn;"): Java/C# put the type before the name;
+                # TypeScript puts the name first with a colon ("title:
+                # string;"), so this shape doesn't occur there. Added after
+                # validating against real books: simplified/pedagogical
+                # Java classes with no imports, modifiers-on-class, or
+                # println calls in view (just bare fields and methods) were
+                # falling through to guess_lexer and landing on essentially
+                # random lexers.
+                re.search(r'^\s*(private\s+|public\s+|protected\s+|final\s+|static\s+)*'
+                          r'[A-Z]\w*(<[^>]*>)?(\[\])?\s+[a-z_]\w*\s*;\s*$', code_text, re.MULTILINE) is not None):
+            try:
+                return get_lexer_by_name('java')
+            except ClassNotFound:
+                pass
+
+        # CSV heuristics (comma-separated values) - requires a consistent
+        # comma count across most non-empty lines, which is the actual
+        # structural invariant of CSV data. The old check ("any comma on 2+
+        # lines") matched almost any multi-line prose paragraph that
+        # happened to use commas.
+        else:
+            csv_lines = [line for line in code_text.split('\n') if line.strip()]
+            if len(csv_lines) >= 2:
+                comma_counts = [line.count(',') for line in csv_lines]
+                if all(c >= 1 for c in comma_counts):
+                    most_common = max(set(comma_counts), key=comma_counts.count)
+                    matching_ratio = comma_counts.count(most_common) / len(comma_counts)
+                    if most_common >= 1 and matching_ratio >= 0.7:
+                        try:
+                            return get_lexer_by_name('text')
+                        except ClassNotFound:
+                            pass
+
+        # If heuristics didn't match, try guess_lexer as fallback. Note:
+        # guess_lexer alone (tested empirically while writing this fix) does
+        # noticeably worse than the heuristics above on short/ambiguous
+        # snippets -- it picks essentially arbitrary lexers (e.g. "GDScript"
+        # for a TypeScript class, "Tera Term macro" for a two-line C
+        # function) out of its ~500-lexer candidate pool. It stays as a
+        # last resort only, not the primary strategy.
         try:
             lexer = guess_lexer(cleaned_code)
             # If guess_lexer returns TextLexer, reject it
