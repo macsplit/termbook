@@ -1,5 +1,11 @@
 # termbook.py — Phased Remediation Plan
 
+**Status: COMPLETE.** All phases (0 through 4.4) are done — see the DONE
+markers and outcome notes throughout. Archived here as a historical record
+of the remediation; no phases remain open. (Phase 3.2 was always scoped as
+"ongoing, no dedicated slot" opportunistic cleanup rather than a discrete
+phase, so its absence of a DONE marker doesn't represent open work.)
+
 Companion to `CODE_AUDIT.md`. This orders the audit findings into phases by **dependency and risk**, not just severity — some "high severity" items (the heuristic rewrite) are deliberately scheduled *after* lower-severity items, because touching them safely requires a test harness that doesn't exist yet, and because a couple of the audit's own recommendations turned out, on closer look at the source, to already be partially built. Those corrections are called out inline where relevant.
 
 Each item lists: the audit reference, exact location, the concrete change, how to verify it, and effort. Phases are meant to be shippable independently — you can stop after any phase and be strictly better off than before it.
