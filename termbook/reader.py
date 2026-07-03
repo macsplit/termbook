@@ -1504,6 +1504,518 @@ def reader(stdscr, ebook, index, width, y, pctg):
     svline = "dontsave"
     show_initial_help = not INITIAL_HELP_SHOWN  # Only show if not previously shown
     help_message_start_time = time.time()  # Track when help message was first shown
+    # --- key-dispatch handlers -------------------------------------------
+    # Each handler below is the verbatim body of what used to be one branch
+    # of a single ~340-line elif chain (Phase 4.2). They're nested functions
+    # so they keep free closure access to reader()'s locals exactly as the
+    # inline code did; the only mechanical additions are the def/nonlocal/
+    # global lines and the three-way return protocol described below.
+    #
+    # A handler returns:
+    #   None                    -> branch fell through normally (equivalent
+    #                               to reaching the end of an elif with no
+    #                               return/continue)
+    #   ("return", payload)      -> the branch used to `return payload`
+    #   ("continue", new_k)      -> the branch used to `k = new_k; continue`
+    #                               (re-dispatch immediately, skipping redraw)
+
+    def _handle_quit():
+        nonlocal countstring
+        if k == ord('q') and countstring != "":
+            countstring = ""
+        else:
+            savestate(ebook.path, index, width, y, y/totlines)
+            sys.exit()
+        return None
+
+    def _handle_scroll_up():
+        nonlocal svline, y
+        if count > 1:
+            svline = y - 1
+        if y >= count:
+            y -= count
+        elif y == 0 and index != 0:
+            return ("return", (-1, width, -rows, None))
+        else:
+            y = 0
+        return None
+
+    def _handle_page_up():
+        nonlocal y
+        if y == 0 and index != 0:
+            return ("return", (-1, width, -rows, None))
+        else:
+            new_y = pgup(y, rows, LINEPRSRV, count)
+            # Skip backward through empty pages if the new position is empty
+            if is_page_empty(src_lines, new_y, rows):
+                new_y = skip_empty_pages_backward(src_lines, new_y, rows)
+            y = new_y
+        return None
+
+    def _handle_scroll_down():
+        nonlocal svline, y
+        if count > 1:
+            svline = y + rows - 1
+        if y + count <= totlines - rows:
+            y += count
+        elif y == totlines - rows and index != len(contents)-1:
+            return ("return", (1, width, 0, None))
+        else:
+            y = totlines - rows
+        return None
+
+    def _handle_page_down():
+        nonlocal y
+        if totlines - y - LINEPRSRV > rows:
+            # y = pgdn(y, totlines, rows, LINEPRSRV, count)
+            new_y = y + rows - LINEPRSRV
+            # Skip forward through empty pages if the new position is empty
+            if is_page_empty(src_lines, new_y, rows):
+                new_y = skip_empty_pages_forward(src_lines, new_y, rows, totlines)
+            y = new_y
+        elif index != len(contents)-1:
+            return ("return", (1, width, 0, None))
+        return None
+
+    def _handle_ch_next():
+        state.CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
+        if index + count < len(contents) - 1:
+            return ("return", (count, width, 0, None))
+        if index + count >= len(contents) - 1:
+            return ("return", (len(contents) - index - 1, width, 0, None))
+        return None
+
+    def _handle_ch_prev():
+        state.CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
+        if index - count > 0:
+            return ("return", (-count, width, 0, None))
+        elif index - count <= 0:
+            return ("return", (-index, width, 0, None))
+        return None
+
+    def _handle_ch_home():
+        nonlocal y
+        y = 0
+        return None
+
+    def _handle_ch_end():
+        nonlocal y
+        y = pgend(totlines, rows)
+        return None
+
+    def _handle_toc():
+        fllwd = toc(stdscr, toc_src, index)
+        if fllwd is not None:
+            if fllwd in {curses.KEY_RESIZE}|HELP|META:
+                return ("continue", fllwd)
+            return ("return", (fllwd - index, width, 0, None))
+        return None
+
+    def _handle_meta():
+        nonlocal k
+        k = meta(stdscr, ebook)
+        if k in {curses.KEY_RESIZE}|HELP|TOC:
+            return ("continue", k)
+        return None
+
+    def _handle_help():
+        nonlocal k
+        k = show_help_dialog(stdscr)
+        if k in {curses.KEY_RESIZE}|META|TOC:
+            return ("continue", k)
+        return None
+
+    def _handle_bookmarks():
+        nonlocal k
+        # Show bookmarks
+        selected_bookmark = bookmarks(stdscr)
+        if selected_bookmark == curses.KEY_RESIZE:
+            k = curses.KEY_RESIZE
+            return ("continue", k)
+        elif selected_bookmark:
+            # User selected a bookmark - always return it (main loop will handle validation)
+            return ("return", selected_bookmark)  # Return bookmark info to main loop
+
+        # Refresh screen after dialog
+        stdscr.clear()
+        stdscr.refresh()
+        return None
+
+    def _handle_save_bookmark():
+        # Save current position as bookmark
+        chapter_title = "Chapter ?"
+        try:
+            if toc_src and index < len(toc_src):
+                chapter_title = toc_src[index]
+        except (IndexError, TypeError):
+            pass
+        position_pct = int((y/totlines) * 100) if totlines > 0 else 0
+        add_bookmark(ebook, index, chapter_title, y, y/totlines)
+        # Show brief confirmation
+        stdscr.addstr(rows-1, 0, " Bookmark saved! ", curses.A_REVERSE)
+        stdscr.refresh()
+        curses.napms(1500)  # Show for 1.5 seconds
+
+        # Refresh screen after dialog
+        stdscr.clear()
+        stdscr.refresh()
+        return None
+
+    # elif k == ord("0"):
+    #     if width != 80 and cols - 2 >= 80:
+    #         return 0, 80, 0, y/totlines
+    #     else:
+    #         return 0, cols - 2, 0, y/totlines
+
+    def _handle_search():
+        global WHOLE_BOOK_SEARCH_START, WHOLE_BOOK_SEARCH_VISITED
+        nonlocal y
+        # Use unified search dialog
+        search_term = search_dialog(stdscr)
+        if search_term:
+            state.CURRENT_SEARCH_TERM = search_term  # Store for highlighting
+
+            # Initialize whole-book search tracking
+            WHOLE_BOOK_SEARCH_START = index
+            WHOLE_BOOK_SEARCH_VISITED = [index]
+
+            # Find first occurrence of search term in current chapter
+            found_in_chapter = False
+            for i, line in enumerate(src_lines[y:], y):
+                if search_term.lower() in line.lower():
+                    y = i
+                    found_in_chapter = True
+                    break
+
+            if found_in_chapter:
+                # Found in current chapter - reset whole-book search and stay here
+                WHOLE_BOOK_SEARCH_START = None
+                WHOLE_BOOK_SEARCH_VISITED = []
+                return ("return", (0, width, y, y/totlines if totlines > 0 else 0))
+            else:
+                # Not found in current chapter, offer whole-book search
+                whole_book_result = offer_whole_book_search(stdscr, search_term, ebook, index, y, width)
+                if whole_book_result:
+                    return ("return", whole_book_result)
+                else:
+                    # User said no to whole-book search
+                    WHOLE_BOOK_SEARCH_START = None
+                    WHOLE_BOOK_SEARCH_VISITED = []
+        else:
+            state.CURRENT_SEARCH_TERM = None  # Clear search term if cancelled
+        return None
+
+    def _handle_open_url():
+        nonlocal k
+        # Find URLs in visible area
+        import re
+        import subprocess
+        import webbrowser
+
+        urls = []
+        seen_urls = set()  # Track URLs we've already found to avoid duplicates
+        seen_domains = {}  # Track domain->url mapping to prefer https over http
+
+        for n, i in enumerate(src_lines[y:y+rows]):
+            # First, find complete URLs with schemes using central function
+            url_data = find_urls_in_text(i)
+            complete_matches = []
+            for url, start, end in url_data:
+                class MockMatch:
+                    def __init__(self, text, start, end):
+                        self._text = text
+                        self._start = start
+                        self._end = end
+                    def group(self): return self._text
+                    def start(self): return self._start
+                    def end(self): return self._end
+                complete_matches.append(MockMatch(url, start, end))
+
+            covered_ranges = []  # Track character ranges covered by complete URLs
+
+            for match in complete_matches:
+                url = match.group()
+                if '.' in url and len(url) > 5:
+                    # Extract domain (without scheme) for deduplication
+                    if url.startswith('https://'):
+                        domain_part = url[8:]  # Remove 'https://'
+                        scheme = 'https'
+                    elif url.startswith('http://'):
+                        domain_part = url[7:]   # Remove 'http://'
+                        scheme = 'http'
+                    else:
+                        domain_part = url
+                        scheme = None
+
+                    # Check if we've seen this domain before
+                    if domain_part in seen_domains:
+                        existing_url, existing_line = seen_domains[domain_part]
+                        existing_scheme = 'https' if existing_url.startswith('https://') else 'http'
+
+                        # Prefer https over http
+                        if scheme == 'https' and existing_scheme == 'http':
+                            # Replace http version with https version
+                            urls = [(u, ln) for u, ln in urls if u != existing_url]
+                            urls.append((url, n))
+                            seen_domains[domain_part] = (url, n)
+                            seen_urls.add(url)
+                            seen_urls.discard(existing_url)
+                        elif scheme == 'http' and existing_scheme == 'https':
+                            # Skip http version, we already have https
+                            pass
+                        # If both same scheme or no clear preference, skip duplicate
+                    else:
+                        # New domain, add it
+                        urls.append((url, n))
+                        seen_urls.add(url)
+                        seen_domains[domain_part] = (url, n)
+
+                    covered_ranges.append((match.start(), match.end()))
+
+            # Then, find URL fragments that aren't part of complete URLs
+            fragment_pattern = r'[a-zA-Z0-9._/\-~?&=#+%]+\.[a-zA-Z]{2,}[a-zA-Z0-9._/\-~?&=#+%]*'
+            fragment_matches = re.finditer(fragment_pattern, i)
+
+            for match in fragment_matches:
+                # Check if this fragment overlaps with any complete URL
+                fragment_start, fragment_end = match.start(), match.end()
+                overlaps = any(start <= fragment_start < end or start < fragment_end <= end
+                             for start, end in covered_ranges)
+
+                if not overlaps:
+                    fragment = match.group()
+                    if '.' in fragment and len(fragment) > 5:
+                        url = 'https://' + fragment
+                        # Check domain deduplication for fragments too
+                        if fragment not in seen_domains:
+                            urls.append((url, n))
+                            seen_urls.add(url)
+                            seen_domains[fragment] = (url, n)
+
+        if urls:
+            if len(urls) == 1:
+                # Single URL found, open it directly
+                url_to_open = urls[0][0]
+                try:
+                    # Try to use xdg-open (Linux), open (macOS), or start (Windows)
+                    # Redirect stdout and stderr to suppress debug output
+                    if os.name == 'posix':
+                        subprocess.run(['xdg-open', url_to_open],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL,
+                                     check=False)
+                    elif os.name == 'nt':
+                        os.startfile(url_to_open)
+                    else:
+                        webbrowser.open(url_to_open)
+                except Exception as e:
+                    # Fallback to webbrowser module
+                    if state.DEBUG_MODE:
+                        print(f"Could not open URL via system opener: {e}", file=sys.stderr)
+                    webbrowser.open(url_to_open)
+            else:
+                # Multiple URLs found, deduplicate first
+                # First, deduplicate by cleaned display URL
+                unique_urls = []
+                seen_display_urls = set()
+
+                for url, line_num in urls[:9]:  # Process up to 9 URLs
+                    # Prefer https over http and clean up display
+                    clean_url = url.replace('http://', 'https://', 1) if url.startswith('http://') else url
+                    # Remove any trailing punctuation for display
+                    clean_url = clean_url.rstrip('.,;:!?)]}>')
+
+                    # Only add if we haven't seen this cleaned URL before
+                    if clean_url not in seen_display_urls:
+                        seen_display_urls.add(clean_url)
+                        unique_urls.append((url, line_num, clean_url))
+
+                # If deduplication resulted in only one unique URL, open it directly
+                if len(unique_urls) == 1:
+                    url_to_open = unique_urls[0][0]
+                    try:
+                        # Try to use xdg-open (Linux), open (macOS), or start (Windows)
+                        # Redirect stdout and stderr to suppress debug output
+                        if os.name == 'posix':
+                            subprocess.run(['xdg-open', url_to_open],
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL,
+                                         check=False)
+                        elif os.name == 'nt':
+                            os.startfile(url_to_open)
+                        else:
+                            webbrowser.open(url_to_open)
+                    except Exception as e:
+                        # Fallback to webbrowser module
+                        if state.DEBUG_MODE:
+                            print(f"Could not open URL via system opener: {e}", file=sys.stderr)
+                        webbrowser.open(url_to_open)
+                else:
+                    # Multiple unique URLs, show selection menu
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "Multiple URLs found. Select one to open:")
+                    for i, (original_url, line_num, clean_url) in enumerate(unique_urls):
+                        # Truncate very long URLs for display
+                        display_url = clean_url if len(clean_url) < 60 else clean_url[:57] + "..."
+                        stdscr.addstr(i + 2, 0, f"{i+1}. {display_url}")
+
+                    # Update the urls list to use the unique ones for selection
+                    urls = [(original_url, line_num) for original_url, line_num, _ in unique_urls]
+                    stdscr.addstr(len(urls) + 3, 0, "Press 1-9 to open a URL, or any other key to cancel")
+                    stdscr.refresh()
+
+                    choice = stdscr.getch()
+
+                    # Exit on resize - return to main reader immediately
+                    if choice == curses.KEY_RESIZE:
+                        # Don't clear screen, let main reader handle redraw
+                        k = curses.KEY_RESIZE
+                    elif ord('1') <= choice <= ord('9') and choice - ord('1') < len(urls):
+                        url_to_open = urls[choice - ord('1')][0]
+                        try:
+                            if os.name == 'posix':
+                                subprocess.run(['xdg-open', url_to_open],
+                                             stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL,
+                                             check=False)
+                            else:
+                                webbrowser.open(url_to_open)
+                        except Exception as e:
+                            if state.DEBUG_MODE:
+                                print(f"Could not open URL via system opener: {e}", file=sys.stderr)
+                            webbrowser.open(url_to_open)
+                    # Clear screen and return to normal display
+                    stdscr.clear()
+                    stdscr.refresh()
+                    # Force pad refresh to redraw the content
+                    try:
+                        pad.refresh(y,0, 0,x, rows-1,x+width)
+                    except curses.error:
+                        pass
+        return None
+
+    def _handle_open_image():
+        visible_images = get_visible_images(src_lines, imgs, y, rows, image_line_map)
+
+        if visible_images:
+            if len(visible_images) == 1:
+                # Single image, open directly
+                img_path = visible_images[0][0]
+                success = open_image_in_system_viewer(ebook, chpath, img_path)
+                if not success:
+                    # Show error message
+                    stdscr.addstr(rows-1, 0, " Could not open image ", curses.A_REVERSE)
+                    stdscr.refresh()
+                    curses.napms(1500)
+            else:
+                # Multiple images, show selection
+                stdscr.clear()
+                stdscr.addstr(0, 0, f"Found {len(visible_images)} images. Select one to open:")
+                for i, (img_path, line_num, img_idx) in enumerate(visible_images[:9]):
+                    display_name = os.path.basename(img_path) if img_path else f"Image {img_idx + 1}"
+                    if len(display_name) > 60:
+                        display_name = display_name[:57] + "..."
+                    stdscr.addstr(i + 2, 0, f"{i+1}. {display_name}")
+
+                stdscr.addstr(len(visible_images) + 3, 0, "Press 1-9 to open an image, or any other key to cancel")
+                stdscr.refresh()
+
+                choice = stdscr.getch()
+                if ord('1') <= choice <= ord('9') and choice - ord('1') < len(visible_images):
+                    img_path = visible_images[choice - ord('1')][0]
+                    success = open_image_in_system_viewer(ebook, chpath, img_path)
+                    if not success:
+                        stdscr.addstr(rows-1, 0, " Could not open image ", curses.A_REVERSE)
+                        stdscr.refresh()
+                        curses.napms(1500)
+
+            # Redraw screen after external program closes
+            stdscr.clear()
+            stdscr.refresh()
+        else:
+            # Show message to user
+            stdscr.addstr(rows-1, 0, " No images visible in current view ", curses.A_REVERSE)
+            stdscr.refresh()
+            curses.napms(1500)
+        return None
+
+    def _handle_colorswitch():
+        if not state.COLORSUPPORT:
+            return None
+        # Simple cycling: 1->2->3->1 (default->dark->light->default)
+        current_color = curses.pair_number(stdscr.getbkgd())
+        next_color = (current_color % 3) + 1
+        stdscr.bkgd(curses.color_pair(next_color))
+        return ("return", (0, width, y, None))
+
+    def _handle_resize():
+        nonlocal rows, cols
+        # Clear any active modals on resize
+        Modal.handle_resize()
+
+        savestate(ebook.path, index, width, y, y/totlines)
+        # Handle resize immediately - keep it simple
+        if sys.platform == "win32":
+            curses.resize_term(rows, cols)
+            rows, cols = stdscr.getmaxyx()
+        else:
+            rows, cols = stdscr.getmaxyx()
+            curses.resize_term(rows, cols)
+        if cols < 22 or rows < 12:
+            sys.exit("ERR: Screen was too small (min 22cols x 12rows).")
+
+        # Calculate new width - be more generous with expansion
+        new_width = max(min(cols - 4, 120), 40)  # Between 40-120 chars, leave 4 char margin
+
+        # Visual cue: show resize info briefly
+        try:
+            stdscr.clear()
+            stdscr.addstr(0, 0, f"Resizing ({cols}x{rows}), please wait...")
+            stdscr.refresh()
+            time.sleep(0.5)  # Show briefly but long enough to read
+        except curses.error:
+            pass
+
+        # Always re-render on resize
+        return ("return", (0, new_width, 0, y/totlines))
+
+    # Dispatch table: same key-set constants that drove the original elif
+    # chain, so this is a mechanical re-expression of the same mapping (no
+    # two sets below share a key, so lookup order cannot matter, unlike the
+    # elif chain it replaces which relied on nothing overlapping either).
+    key_handlers = {}
+    for _k in QUIT:
+        key_handlers[_k] = _handle_quit
+    for _k in SCROLL_UP:
+        key_handlers[_k] = _handle_scroll_up
+    for _k in PAGE_UP:
+        key_handlers[_k] = _handle_page_up
+    for _k in SCROLL_DOWN:
+        key_handlers[_k] = _handle_scroll_down
+    for _k in PAGE_DOWN:
+        key_handlers[_k] = _handle_page_down
+    for _k in CH_NEXT:
+        key_handlers[_k] = _handle_ch_next
+    for _k in CH_PREV:
+        key_handlers[_k] = _handle_ch_prev
+    for _k in CH_HOME:
+        key_handlers[_k] = _handle_ch_home
+    for _k in CH_END:
+        key_handlers[_k] = _handle_ch_end
+    for _k in TOC:
+        key_handlers[_k] = _handle_toc
+    for _k in META:
+        key_handlers[_k] = _handle_meta
+    for _k in HELP:
+        key_handlers[_k] = _handle_help
+    key_handlers[BOOKMARKS] = _handle_bookmarks
+    key_handlers[SAVE_BOOKMARK] = _handle_save_bookmark
+    key_handlers[ord("/")] = _handle_search
+    key_handlers[ord("u")] = _handle_open_url
+    key_handlers[ord("i")] = _handle_open_image
+    key_handlers[COLORSWITCH] = _handle_colorswitch
+    key_handlers[curses.KEY_RESIZE] = _handle_resize
+
     while True:
         if countstring == "":
             count = 1
@@ -1512,414 +2024,16 @@ def reader(stdscr, ebook, index, width, y, pctg):
         if k in range(48, 58): # i.e., k is a numeral
             countstring = countstring + chr(k)
         else:
-            if k in QUIT:
-                if k == ord('q') and countstring != "":
-                    countstring = ""
-                else:
-                    savestate(ebook.path, index, width, y, y/totlines)
-                    sys.exit()
-            elif k in SCROLL_UP:
-                if count > 1:
-                    svline = y - 1
-                if y >= count:
-                    y -= count
-                elif y == 0 and index != 0:
-                    return -1, width, -rows, None
-                else:
-                    y = 0
-            elif k in PAGE_UP:
-                if y == 0 and index != 0:
-                    return -1, width, -rows, None
-                else:
-                    new_y = pgup(y, rows, LINEPRSRV, count)
-                    # Skip backward through empty pages if the new position is empty
-                    if is_page_empty(src_lines, new_y, rows):
-                        new_y = skip_empty_pages_backward(src_lines, new_y, rows)
-                    y = new_y
-            elif k in SCROLL_DOWN:
-                if count > 1:
-                    svline = y + rows - 1
-                if y + count <= totlines - rows:
-                    y += count
-                elif y == totlines - rows and index != len(contents)-1:
-                    return 1, width, 0, None
-                else:
-                    y = totlines - rows
-            elif k in PAGE_DOWN:
-                if totlines - y - LINEPRSRV > rows:
-                    # y = pgdn(y, totlines, rows, LINEPRSRV, count)
-                    new_y = y + rows - LINEPRSRV
-                    # Skip forward through empty pages if the new position is empty
-                    if is_page_empty(src_lines, new_y, rows):
-                        new_y = skip_empty_pages_forward(src_lines, new_y, rows, totlines)
-                    y = new_y
-                elif index != len(contents)-1:
-                    return 1, width, 0, None
-            elif k in CH_NEXT:
-                state.CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
-                if index + count < len(contents) - 1:
-                    return count, width, 0, None
-                if index + count >= len(contents) - 1:
-                    return len(contents) - index - 1, width, 0, None
-            elif k in CH_PREV:
-                state.CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
-                if index - count > 0:
-                   return -count, width, 0, None
-                elif index - count <= 0:
-                   return -index, width, 0, None
-            elif k in CH_HOME:
-                y = 0
-            elif k in CH_END:
-                y = pgend(totlines, rows)
-            elif k in TOC:
-                fllwd = toc(stdscr, toc_src, index)
-                if fllwd is not None:
-                    if fllwd in {curses.KEY_RESIZE}|HELP|META:
-                        k = fllwd
+            handler = key_handlers.get(k)
+            if handler is not None:
+                outcome = handler()
+                if outcome is not None:
+                    kind, payload = outcome
+                    if kind == "return":
+                        return payload
+                    else:  # "continue"
+                        k = payload
                         continue
-                    return fllwd - index, width, 0, None
-            elif k in META:
-                k = meta(stdscr, ebook)
-                if k in {curses.KEY_RESIZE}|HELP|TOC:
-                    continue
-            elif k in HELP:
-                k = show_help_dialog(stdscr)
-                if k in {curses.KEY_RESIZE}|META|TOC:
-                    continue
-            elif k == BOOKMARKS:
-                # Show bookmarks
-                selected_bookmark = bookmarks(stdscr)
-                if selected_bookmark == curses.KEY_RESIZE:
-                    k = curses.KEY_RESIZE
-                    continue
-                elif selected_bookmark:
-                    # User selected a bookmark - always return it (main loop will handle validation)
-                    return selected_bookmark  # Return bookmark info to main loop
-                
-                # Refresh screen after dialog
-                stdscr.clear()
-                stdscr.refresh()
-            elif k == SAVE_BOOKMARK:
-                # Save current position as bookmark
-                chapter_title = "Chapter ?"
-                try:
-                    if toc_src and index < len(toc_src):
-                        chapter_title = toc_src[index]
-                except (IndexError, TypeError):
-                    pass
-                position_pct = int((y/totlines) * 100) if totlines > 0 else 0
-                add_bookmark(ebook, index, chapter_title, y, y/totlines)
-                # Show brief confirmation
-                stdscr.addstr(rows-1, 0, " Bookmark saved! ", curses.A_REVERSE)
-                stdscr.refresh()
-                curses.napms(1500)  # Show for 1.5 seconds
-                
-                # Refresh screen after dialog
-                stdscr.clear()
-                stdscr.refresh()
-            # elif k == ord("0"):
-            #     if width != 80 and cols - 2 >= 80:
-            #         return 0, 80, 0, y/totlines
-            #     else:
-            #         return 0, cols - 2, 0, y/totlines
-            elif k == ord("/"):
-                # Use unified search dialog
-                search_term = search_dialog(stdscr)
-                if search_term:
-                    state.CURRENT_SEARCH_TERM = search_term  # Store for highlighting
-
-                    # Initialize whole-book search tracking
-                    WHOLE_BOOK_SEARCH_START = index
-                    WHOLE_BOOK_SEARCH_VISITED = [index]
-                    
-                    # Find first occurrence of search term in current chapter
-                    found_in_chapter = False
-                    for i, line in enumerate(src_lines[y:], y):
-                        if search_term.lower() in line.lower():
-                            y = i
-                            found_in_chapter = True
-                            break
-                    
-                    if found_in_chapter:
-                        # Found in current chapter - reset whole-book search and stay here
-                        WHOLE_BOOK_SEARCH_START = None
-                        WHOLE_BOOK_SEARCH_VISITED = []
-                        return 0, width, y, y/totlines if totlines > 0 else 0
-                    else:
-                        # Not found in current chapter, offer whole-book search
-                        whole_book_result = offer_whole_book_search(stdscr, search_term, ebook, index, y, width)
-                        if whole_book_result:
-                            return whole_book_result
-                        else:
-                            # User said no to whole-book search
-                            WHOLE_BOOK_SEARCH_START = None
-                            WHOLE_BOOK_SEARCH_VISITED = []
-                else:
-                    state.CURRENT_SEARCH_TERM = None  # Clear search term if cancelled
-            elif k == ord("u"):  # Open URL
-                # Find URLs in visible area
-                import re
-                import subprocess
-                import webbrowser
-                
-                urls = []
-                seen_urls = set()  # Track URLs we've already found to avoid duplicates
-                seen_domains = {}  # Track domain->url mapping to prefer https over http
-                
-                for n, i in enumerate(src_lines[y:y+rows]):
-                    # First, find complete URLs with schemes using central function
-                    url_data = find_urls_in_text(i)
-                    complete_matches = []
-                    for url, start, end in url_data:
-                        class MockMatch:
-                            def __init__(self, text, start, end):
-                                self._text = text
-                                self._start = start
-                                self._end = end
-                            def group(self): return self._text
-                            def start(self): return self._start
-                            def end(self): return self._end
-                        complete_matches.append(MockMatch(url, start, end))
-                    
-                    covered_ranges = []  # Track character ranges covered by complete URLs
-                    
-                    for match in complete_matches:
-                        url = match.group()
-                        if '.' in url and len(url) > 5:
-                            # Extract domain (without scheme) for deduplication
-                            if url.startswith('https://'):
-                                domain_part = url[8:]  # Remove 'https://'
-                                scheme = 'https'
-                            elif url.startswith('http://'):
-                                domain_part = url[7:]   # Remove 'http://'
-                                scheme = 'http'
-                            else:
-                                domain_part = url
-                                scheme = None
-                            
-                            # Check if we've seen this domain before
-                            if domain_part in seen_domains:
-                                existing_url, existing_line = seen_domains[domain_part]
-                                existing_scheme = 'https' if existing_url.startswith('https://') else 'http'
-                                
-                                # Prefer https over http
-                                if scheme == 'https' and existing_scheme == 'http':
-                                    # Replace http version with https version
-                                    urls = [(u, ln) for u, ln in urls if u != existing_url]
-                                    urls.append((url, n))
-                                    seen_domains[domain_part] = (url, n)
-                                    seen_urls.add(url)
-                                    seen_urls.discard(existing_url)
-                                elif scheme == 'http' and existing_scheme == 'https':
-                                    # Skip http version, we already have https
-                                    pass
-                                # If both same scheme or no clear preference, skip duplicate
-                            else:
-                                # New domain, add it
-                                urls.append((url, n))
-                                seen_urls.add(url)
-                                seen_domains[domain_part] = (url, n)
-                            
-                            covered_ranges.append((match.start(), match.end()))
-                    
-                    # Then, find URL fragments that aren't part of complete URLs
-                    fragment_pattern = r'[a-zA-Z0-9._/\-~?&=#+%]+\.[a-zA-Z]{2,}[a-zA-Z0-9._/\-~?&=#+%]*'
-                    fragment_matches = re.finditer(fragment_pattern, i)
-                    
-                    for match in fragment_matches:
-                        # Check if this fragment overlaps with any complete URL
-                        fragment_start, fragment_end = match.start(), match.end()
-                        overlaps = any(start <= fragment_start < end or start < fragment_end <= end 
-                                     for start, end in covered_ranges)
-                        
-                        if not overlaps:
-                            fragment = match.group()
-                            if '.' in fragment and len(fragment) > 5:
-                                url = 'https://' + fragment
-                                # Check domain deduplication for fragments too
-                                if fragment not in seen_domains:
-                                    urls.append((url, n))
-                                    seen_urls.add(url)
-                                    seen_domains[fragment] = (url, n)
-                
-                if urls:
-                    if len(urls) == 1:
-                        # Single URL found, open it directly
-                        url_to_open = urls[0][0]
-                        try:
-                            # Try to use xdg-open (Linux), open (macOS), or start (Windows)
-                            # Redirect stdout and stderr to suppress debug output
-                            if os.name == 'posix':
-                                subprocess.run(['xdg-open', url_to_open], 
-                                             stdout=subprocess.DEVNULL, 
-                                             stderr=subprocess.DEVNULL,
-                                             check=False)
-                            elif os.name == 'nt':
-                                os.startfile(url_to_open)
-                            else:
-                                webbrowser.open(url_to_open)
-                        except Exception as e:
-                            # Fallback to webbrowser module
-                            if state.DEBUG_MODE:
-                                print(f"Could not open URL via system opener: {e}", file=sys.stderr)
-                            webbrowser.open(url_to_open)
-                    else:
-                        # Multiple URLs found, deduplicate first
-                        # First, deduplicate by cleaned display URL
-                        unique_urls = []
-                        seen_display_urls = set()
-                        
-                        for url, line_num in urls[:9]:  # Process up to 9 URLs
-                            # Prefer https over http and clean up display
-                            clean_url = url.replace('http://', 'https://', 1) if url.startswith('http://') else url
-                            # Remove any trailing punctuation for display
-                            clean_url = clean_url.rstrip('.,;:!?)]}>') 
-                            
-                            # Only add if we haven't seen this cleaned URL before
-                            if clean_url not in seen_display_urls:
-                                seen_display_urls.add(clean_url)
-                                unique_urls.append((url, line_num, clean_url))
-                        
-                        # If deduplication resulted in only one unique URL, open it directly
-                        if len(unique_urls) == 1:
-                            url_to_open = unique_urls[0][0]
-                            try:
-                                # Try to use xdg-open (Linux), open (macOS), or start (Windows)
-                                # Redirect stdout and stderr to suppress debug output
-                                if os.name == 'posix':
-                                    subprocess.run(['xdg-open', url_to_open], 
-                                                 stdout=subprocess.DEVNULL, 
-                                                 stderr=subprocess.DEVNULL,
-                                                 check=False)
-                                elif os.name == 'nt':
-                                    os.startfile(url_to_open)
-                                else:
-                                    webbrowser.open(url_to_open)
-                            except Exception as e:
-                                # Fallback to webbrowser module
-                                if state.DEBUG_MODE:
-                                    print(f"Could not open URL via system opener: {e}", file=sys.stderr)
-                                webbrowser.open(url_to_open)
-                        else:
-                            # Multiple unique URLs, show selection menu
-                            stdscr.clear()
-                            stdscr.addstr(0, 0, "Multiple URLs found. Select one to open:")
-                            for i, (original_url, line_num, clean_url) in enumerate(unique_urls):
-                                # Truncate very long URLs for display
-                                display_url = clean_url if len(clean_url) < 60 else clean_url[:57] + "..."
-                                stdscr.addstr(i + 2, 0, f"{i+1}. {display_url}")
-                            
-                            # Update the urls list to use the unique ones for selection
-                            urls = [(original_url, line_num) for original_url, line_num, _ in unique_urls]
-                            stdscr.addstr(len(urls) + 3, 0, "Press 1-9 to open a URL, or any other key to cancel")
-                            stdscr.refresh()
-                            
-                            choice = stdscr.getch()
-                            
-                            # Exit on resize - return to main reader immediately
-                            if choice == curses.KEY_RESIZE:
-                                # Don't clear screen, let main reader handle redraw
-                                k = curses.KEY_RESIZE
-                            elif ord('1') <= choice <= ord('9') and choice - ord('1') < len(urls):
-                                url_to_open = urls[choice - ord('1')][0]
-                                try:
-                                    if os.name == 'posix':
-                                        subprocess.run(['xdg-open', url_to_open], 
-                                                     stdout=subprocess.DEVNULL, 
-                                                     stderr=subprocess.DEVNULL,
-                                                     check=False)
-                                    else:
-                                        webbrowser.open(url_to_open)
-                                except Exception as e:
-                                    if state.DEBUG_MODE:
-                                        print(f"Could not open URL via system opener: {e}", file=sys.stderr)
-                                    webbrowser.open(url_to_open)
-                            # Clear screen and return to normal display
-                            stdscr.clear()
-                            stdscr.refresh()
-                            # Force pad refresh to redraw the content
-                            try:
-                                pad.refresh(y,0, 0,x, rows-1,x+width)
-                            except curses.error:
-                                pass
-            elif k == ord("i"):
-                visible_images = get_visible_images(src_lines, imgs, y, rows, image_line_map)
-
-                if visible_images:
-                    if len(visible_images) == 1:
-                        # Single image, open directly
-                        img_path = visible_images[0][0]
-                        success = open_image_in_system_viewer(ebook, chpath, img_path)
-                        if not success:
-                            # Show error message
-                            stdscr.addstr(rows-1, 0, " Could not open image ", curses.A_REVERSE)
-                            stdscr.refresh()
-                            curses.napms(1500)
-                    else:
-                        # Multiple images, show selection
-                        stdscr.clear()
-                        stdscr.addstr(0, 0, f"Found {len(visible_images)} images. Select one to open:")
-                        for i, (img_path, line_num, img_idx) in enumerate(visible_images[:9]):
-                            display_name = os.path.basename(img_path) if img_path else f"Image {img_idx + 1}"
-                            if len(display_name) > 60:
-                                display_name = display_name[:57] + "..."
-                            stdscr.addstr(i + 2, 0, f"{i+1}. {display_name}")
-                        
-                        stdscr.addstr(len(visible_images) + 3, 0, "Press 1-9 to open an image, or any other key to cancel")
-                        stdscr.refresh()
-                        
-                        choice = stdscr.getch()
-                        if ord('1') <= choice <= ord('9') and choice - ord('1') < len(visible_images):
-                            img_path = visible_images[choice - ord('1')][0]
-                            success = open_image_in_system_viewer(ebook, chpath, img_path)
-                            if not success:
-                                stdscr.addstr(rows-1, 0, " Could not open image ", curses.A_REVERSE)
-                                stdscr.refresh()
-                                curses.napms(1500)
-                    
-                    # Redraw screen after external program closes
-                    stdscr.clear()
-                    stdscr.refresh()
-                else:
-                    # Show message to user
-                    stdscr.addstr(rows-1, 0, " No images visible in current view ", curses.A_REVERSE)
-                    stdscr.refresh()
-                    curses.napms(1500)
-            elif k == COLORSWITCH and state.COLORSUPPORT:
-                # Simple cycling: 1->2->3->1 (default->dark->light->default)
-                current_color = curses.pair_number(stdscr.getbkgd())
-                next_color = (current_color % 3) + 1
-                stdscr.bkgd(curses.color_pair(next_color))
-                return 0, width, y, None
-            elif k == curses.KEY_RESIZE:
-                # Clear any active modals on resize
-                Modal.handle_resize()
-                
-                savestate(ebook.path, index, width, y, y/totlines)
-                # Handle resize immediately - keep it simple
-                if sys.platform == "win32":
-                    curses.resize_term(rows, cols)
-                    rows, cols = stdscr.getmaxyx()
-                else:
-                    rows, cols = stdscr.getmaxyx()
-                    curses.resize_term(rows, cols)
-                if cols < 22 or rows < 12:
-                    sys.exit("ERR: Screen was too small (min 22cols x 12rows).")
-                
-                # Calculate new width - be more generous with expansion
-                new_width = max(min(cols - 4, 120), 40)  # Between 40-120 chars, leave 4 char margin
-                
-                # Visual cue: show resize info briefly
-                try:
-                    stdscr.clear()
-                    stdscr.addstr(0, 0, f"Resizing ({cols}x{rows}), please wait...")
-                    stdscr.refresh()
-                    time.sleep(0.5)  # Show briefly but long enough to read
-                except curses.error:
-                    pass
-                
-                # Always re-render on resize
-                return 0, new_width, 0, y/totlines
             countstring = ""
 
         if svline != "dontsave":
