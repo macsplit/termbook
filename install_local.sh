@@ -62,8 +62,15 @@ echo -e "${YELLOW}Activating virtual environment...${NC}"
 source "$VENV_DIR/bin/activate"
 
 # Upgrade pip and install build tools
-echo -e "${YELLOW}Upgrading pip and installing build tools...${NC}"
-pip install --upgrade pip setuptools wheel
+echo -e "${YELLOW}Installing build tools...${NC}"
+# Deliberately not upgrading pip itself here: the venv's bundled pip is
+# already recent enough for a plain editable install, and a self-upgrade
+# to "whatever's newest" has been observed to install a broken pip release
+# (a pip build whose own vendored copy of the `packaging` library was
+# internally inconsistent, breaking every subsequent pip invocation in the
+# venv, including the very next step in this script). Installing
+# setuptools/wheel without touching pip itself avoids that failure mode.
+pip install setuptools wheel
 
 # Install dependencies
 echo -e "${YELLOW}Installing dependencies...${NC}"

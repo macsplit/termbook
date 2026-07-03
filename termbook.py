@@ -37,7 +37,7 @@ Key Binding:
 
 
 __version__ = "1.1.1"
-__build_time__ = "2026-07-03 00:54:03"
+__build_time__ = "2026-07-03 02:03:41"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -1298,6 +1298,14 @@ class HTMLtoLines(HTMLParser):
             return lexer
         except ClassNotFound:
             # Default to TextLexer if nothing matched
+            return TextLexer()
+        except Exception:
+            # guess_lexer() iterates Pygments' entire lexer registry, which
+            # has been observed to raise a bare KeyError on some Pygments
+            # releases with a broken/stale registry entry -- a bug in
+            # Pygments itself, not anything specific to the text being
+            # classified. Fall back to plain text rather than let a broken
+            # third-party lexer registry crash the reader.
             return TextLexer()
     
     def reorganize_callouts(self, code_text):
