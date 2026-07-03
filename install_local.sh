@@ -98,8 +98,13 @@ cat > "$WRAPPER_SCRIPT" << EOF
 #!/bin/bash
 # Termbook wrapper script - auto-generated
 TERMBOOK_DIR="$PROJECT_DIR"
-source "\$TERMBOOK_DIR/venv/bin/activate"
-exec "\$TERMBOOK_DIR/venv/bin/termbook" "\$@"
+# Invoke the module directly via the venv's python3 (a stable symlink) rather
+# than exec-ing venv/bin/termbook: that generated console script has its
+# interpreter path baked into its own shebang line at build time, so if that
+# one file is ever stale/corrupted (e.g. copied in from elsewhere, or the venv
+# rebuilt on another machine) this wrapper breaks even though nothing else
+# about the install is wrong. "python3 -m termbook" has no such dependency.
+exec "\$TERMBOOK_DIR/venv/bin/python3" -m termbook "\$@"
 EOF
 
 # Make the wrapper script executable
