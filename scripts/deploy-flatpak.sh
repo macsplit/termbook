@@ -19,7 +19,7 @@ NUC_HOST="${NUC_HOST:-nuc}"
 NUC_DEPLOY_DIR="${NUC_DEPLOY_DIR:-/var/www/termbook}"
 FLATPAK_ARCH="${FLATPAK_ARCH:-x86_64}"
 FLATPAK_BRANCH="${FLATPAK_BRANCH:-master}"
-APP_ID="uk.leehanken.termbook"
+APP_ID="dev.termbook.Termbook"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/build/flatpak"

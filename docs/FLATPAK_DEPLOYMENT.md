@@ -64,7 +64,7 @@ flatpak-builder \
     --repo=build/flatpak/repo \
     --force-clean \
     build/flatpak/build \
-    flatpak/uk.leehanken.termbook.json
+    flatpak/dev.termbook.Termbook.json
 ```
 
 ### 2. Create Repository Files
@@ -114,7 +114,7 @@ server {
         try_files $uri $uri/ =404;
     }
 
-    location = /uk.leehanken.termbook.flatpakref {
+    location = /dev.termbook.Termbook.flatpakref {
         default_type application/vnd.flatpak.ref;
     }
 
@@ -152,7 +152,7 @@ The repository signature ensures integrity but is not required for installation.
 ### Check Flatpak Build
 
 ```bash
-flatpak info uk.leehanken.termbook
+flatpak info dev.termbook.Termbook
 flatpak ls
 ```
 
@@ -160,14 +160,14 @@ flatpak ls
 
 ```bash
 curl -I http://localhost:$PORT/index.html
-curl -I http://localhost:$PORT/uk.leehanken.termbook.flatpakref
+curl -I http://localhost:$PORT/dev.termbook.Termbook.flatpakref
 ```
 
 ### Test Installation
 
 ```bash
-flatpak install --user --from https://termbook.dev/uk.leehanken.termbook.flatpakref
-flatpak run uk.leehanken.termbook ~/path/to/book.epub
+flatpak install --user --from https://termbook.dev/dev.termbook.Termbook.flatpakref
+flatpak run dev.termbook.Termbook ~/path/to/book.epub
 ```
 
 ## Troubleshooting
