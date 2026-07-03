@@ -37,7 +37,7 @@ Key Binding:
 
 
 __version__ = "1.1.1"
-__build_time__ = "2026-07-03 02:09:15"
+__build_time__ = "2026-07-03 02:29:02"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -1561,8 +1561,10 @@ class HTMLtoLines(HTMLParser):
             
             return result if result else [(code_text, [])]
             
-        except Exception:
+        except Exception as e:
             # Fall back to theme-appropriate colors if highlighting fails
+            if DEBUG_MODE:
+                print(f"Syntax highlighting failed: {e}", file=sys.stderr)
             lines = code_text.split('\n')
             result = []
             for line in lines:
@@ -1968,13 +1970,13 @@ def show_initial_help_message(stdscr, rows, cols):
                 else:
                     # Fallback to reverse video
                     stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
-            except:
+            except curses.error:
                 # Fallback to reverse video
                 stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
         else:
             # No color support, use reverse video
             stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
-    except:
+    except curses.error:
         # Silently fail if screen dimensions are unstable during resize
         pass
 
@@ -2016,7 +2018,7 @@ def show_persistent_hint(stdscr, rows, cols, has_urls, has_images):
         else:
             # No color support, use reverse video
             stdscr.addstr(rows - 1, start_col, message, curses.A_REVERSE)
-    except:
+    except curses.error:
         # Silently fail if screen dimensions are unstable during resize
         pass
 
@@ -2307,6 +2309,8 @@ def open_image_in_system_viewer(ebook, chpath, img_path):
                          check=False)
         return True
     except Exception as e:
+        if DEBUG_MODE:
+            print(f"Could not open image in system viewer: {e}", file=sys.stderr)
         return False
 
 def loadstate():
@@ -2379,7 +2383,9 @@ def load_bookmarks():
             # Save cleaned list back if we removed any
             if len(valid_bookmarks) < len(data):
                 save_bookmarks()
-    except:
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"Could not load bookmarks from {BOOKMARKSFILE}: {e}", file=sys.stderr)
         GLOBAL_BOOKMARKS = []
 
 def save_bookmarks():
@@ -2389,8 +2395,9 @@ def save_bookmarks():
         with open(BOOKMARKSFILE, 'w', encoding='utf-8') as f:
             import json
             json.dump(GLOBAL_BOOKMARKS, f, indent=2, ensure_ascii=False)
-    except:
-        pass
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"Could not save bookmarks to {BOOKMARKSFILE}: {e}", file=sys.stderr)
 
 # =============================================================================
 # UNIFIED MODAL SYSTEM
@@ -2451,7 +2458,7 @@ class Modal:
                 
             dialog.nodelay(False)
             return key
-        except:
+        except curses.error:
             dialog.nodelay(False)
             return dialog.getch()
     
@@ -2698,7 +2705,7 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
         # No search term or no text - just render normally
         try:
             pad.addstr(n, x, text, default_attr)
-        except:
+        except curses.error:
             pass
         return
         
@@ -2713,7 +2720,7 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
             before_text = text[last_pos:match.start()]
             try:
                 pad.addstr(n, x + last_pos, before_text, default_attr)
-            except:
+            except curses.error:
                 pass
         
         # Add highlighted match
@@ -2735,12 +2742,12 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
                         curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_YELLOW)
                     
                     pad.addstr(n, x + match.start(), match_text, curses.color_pair(search_color_pair))
-                except:
+                except curses.error:
                     # Fallback to reverse video
                     pad.addstr(n, x + match.start(), match_text, curses.A_REVERSE | curses.A_BOLD)
             else:
                 pad.addstr(n, x + match.start(), match_text, curses.A_REVERSE | curses.A_BOLD)
-        except:
+        except curses.error:
             pass
             
         last_pos = match.end()
@@ -2750,7 +2757,7 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
         remaining_text = text[last_pos:]
         try:
             pad.addstr(n, x + last_pos, remaining_text, default_attr)
-        except:
+        except curses.error:
             pass
 
 def search_whole_book(stdscr, search_term, ebook, current_index, current_y, width):
@@ -2823,7 +2830,7 @@ def add_bookmark(ebook, chapter_index, chapter_title, position, pctg):
         book_title = re.sub(r'<[^>]*>', '', book_title).strip()
         if not book_title:
             book_title = os.path.basename(ebook.path)
-    except:
+    except (IndexError, TypeError, AttributeError):
         book_title = os.path.basename(ebook.path)
     
     bookmark = {
@@ -2909,7 +2916,7 @@ def check_terminal_size_changed(stdscr):
             return True
             
         return False
-    except:
+    except curses.error:
         return False
 
 
@@ -2996,7 +3003,7 @@ def bookmarks(stdscr):
                 from datetime import datetime
                 dt = datetime.fromisoformat(bookmark['created'])
                 timestamp = dt.strftime("%m/%d %H:%M")
-            except:
+            except (ValueError, TypeError):
                 timestamp = ""
         
         # Get position percentage
@@ -3121,7 +3128,7 @@ def bookmarks(stdscr):
                             from datetime import datetime
                             dt = datetime.fromisoformat(bookmark['created'])
                             timestamp = dt.strftime("%m/%d %H:%M")
-                        except:
+                        except (ValueError, TypeError):
                             timestamp = ""
                     
                     # Get position percentage
@@ -3441,7 +3448,8 @@ def open_media(scr, epub, src):
                 
         except Exception as e:
             # Fall back to external viewer if terminal display fails
-            pass
+            if DEBUG_MODE:
+                print(f"Inline image display failed, falling back to external viewer: {e}", file=sys.stderr)
     
     # Fall back to external viewer for non-images or if display failed
     fd, path = tempfile.mkstemp(suffix=sfx)
@@ -3654,13 +3662,7 @@ _SEARCH_PAIR_START = 32001  # Reserved pairs for search highlighting
 
 def get_ui_color_pair(purpose="loading"):
     """Get a dedicated color pair for UI elements like loading messages."""
-    try:
-        if purpose == "loading":
-            # Use predefined color pairs to avoid conflicts
-            return 1  # Default color pair (reliable)
-        return 1  # Fallback to default
-    except:
-        return 1  # Safe fallback
+    return 1  # Default color pair (reliable)
 
 def init_syntax_color_pairs():
     """Pre-allocate color pairs for syntax highlighting."""
@@ -3788,7 +3790,7 @@ def rgb_to_color_index(r, g, b):
         g_level_6 = min(5, int(g_level * 6 / 8))
         b_level_6 = min(5, int(b_level * 6 / 8))
         return 16 + r_level_6 * 36 + g_level_6 * 6 + b_level_6
-    except:
+    except (TypeError, ValueError):
         return 7  # Default white
 
 def get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True):
@@ -3974,6 +3976,8 @@ def render_image_with_fabulous(img_data, max_width, max_height):
         
     except Exception as e:
         # Fall back to quarter blocks if Fabulous fails
+        if DEBUG_MODE:
+            print(f"Fabulous image rendering failed: {e}", file=sys.stderr)
         if hasattr(img_data, 'save'):
             return render_image_with_quarter_blocks(img_data, max_width, max_height)
         else:
@@ -3982,7 +3986,9 @@ def render_image_with_fabulous(img_data, max_width, max_height):
                 from PIL import Image
                 img = Image.open(BytesIO(img_data))
                 return render_image_with_quarter_blocks(img, max_width, max_height)
-            except:
+            except Exception as e2:
+                if DEBUG_MODE:
+                    print(f"Quarter-block fallback also failed: {e2}", file=sys.stderr)
                 return []
 
 
@@ -4357,7 +4363,7 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                         # For very small images, be even more aggressive
                         if total_area <= 2000 and colors and len(colors) <= 10:
                             is_decorative = True
-                    except:
+                    except Exception:
                         pass
                     
                     # Check for very thin images that span most of a line (borders, rules)
@@ -4486,6 +4492,8 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                             
                     except Exception as e:
                         # Fallback to original pixel processing if Fabulous fails
+                        if DEBUG_MODE:
+                            print(f"Fabulous rendering failed for image {img_idx}, using pixel fallback: {e}", file=sys.stderr)
                         # Keep original image for high-quality oversampling
                         orig_img = img.copy()
                         orig_w, orig_h = orig_img.size
@@ -4532,6 +4540,8 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     
                 except Exception as e:
                     # If image can't be processed, show error message
+                    if DEBUG_MODE:
+                        print(f"Could not render image {imgs[img_idx]}: {e}", file=sys.stderr)
                     error_msg = f"[Error loading image: {imgs[img_idx]}]"
                     new_lines.append(" " * ((max_width - len(error_msg)) // 2) + error_msg)
                     image_info.append([])
@@ -4571,7 +4581,7 @@ def show_loading_animation(stdscr, message="Loading..."):
         # Only clear the space where the loading message will appear - exact length only
         if start_col >= 0 and start_col + msg_len <= cols:
             stdscr.addstr(center_row, start_col, " " * msg_len)
-    except:
+    except curses.error:
         pass
     
     # Create saturated two-color gradient with doubled sequence
@@ -4634,7 +4644,7 @@ def update_loading_animation(stdscr, message, start_col, center_row, spectrum_co
                     else:
                         # Fallback: use terminal color directly if pair creation failed
                         stdscr.addstr(center_row, start_col + i, char, curses.color_pair(color_idx_terminal) | curses.A_BOLD)
-                except:
+                except curses.error:
                     # Final fallback to bold
                     stdscr.addstr(center_row, start_col + i, char, curses.A_BOLD)
             else:
@@ -4642,7 +4652,7 @@ def update_loading_animation(stdscr, message, start_col, center_row, spectrum_co
                 stdscr.addstr(center_row, start_col + i, char, curses.A_BOLD)
         
         stdscr.refresh()
-    except:
+    except curses.error:
         pass  # Ignore any display errors
 
 def reader(stdscr, ebook, index, width, y, pctg):
@@ -4673,8 +4683,9 @@ def reader(stdscr, ebook, index, width, y, pctg):
     try:
         parser.feed(content)
         parser.close()
-    except:
-        pass
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"HTML parsing failed for {chpath}: {e}", file=sys.stderr)
 
     src_lines, imgs, img_alts = parser.get_lines(width)
     
@@ -4729,7 +4740,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         stdscr.refresh()
                         curses.napms(1000)  # Show briefly
                         return 0, width, y, y/totlines if totlines > 0 else 0
-                except:
+                except curses.error:
                     pass  # No key pressed
                 finally:
                     stdscr.nodelay(False)  # Restore blocking input
@@ -4797,7 +4808,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         for bg_col in range(cols - x):
                             try:
                                 pad.addstr(n, bg_col, " ", curses.color_pair(code_bg_pair))
-                            except:
+                            except curses.error:
                                 pass  # Ignore if we can't write at this position
                 
                 if "|" in content:
@@ -4843,25 +4854,25 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                     if color_pair > 0:
                                         try:
                                             pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
-                                        except:
+                                        except curses.error:
                                             break  # Stop if we can't write anymore
                                     else:
                                         # Fallback to bold if color pair couldn't be created
                                         try:
                                             pad.addstr(n, char_idx, char, curses.A_BOLD)
-                                        except:
+                                        except curses.error:
                                             break  # Stop if we can't write anymore
                                 else:
                                     # Invalid color format, use regular text
                                     try:
                                         pad.addstr(n, char_idx, char)
-                                    except:
+                                    except curses.error:
                                         break  # Stop if we can't write anymore
                             else:
                                 # Regular text
                                 try:
                                     pad.addstr(n, char_idx, char)
-                                except:
+                                except curses.error:
                                     break  # Stop if we can't write anymore
                         
                         # Fill remaining line with background color for code blocks
@@ -4880,7 +4891,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                 for fill_col in range(text_end, cols - x):
                                     try:
                                         pad.addstr(n, fill_col, " ", curses.color_pair(bg_pair))
-                                    except:
+                                    except curses.error:
                                         break  # Stop if we can't write anymore
                         
                         # Highlight search results with inverse video bright
@@ -4915,13 +4926,13 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                                         curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_GREEN)
                                                     
                                                     pad.addstr(n, abs_char_pos, char, curses.color_pair(search_color_pair) | curses.A_BOLD)
-                                                except:
+                                                except curses.error:
                                                     # If color pair creation fails, fall back to reverse video
                                                     pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
                                             else:
                                                 # Fallback to just inverse and bold
                                                 pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
-                                        except:
+                                        except curses.error:
                                             break  # Stop if we can't write anymore
                         
                         # Now look for annotation patterns (#1, #2, #3, etc.) and highlight them
@@ -4947,10 +4958,12 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                         if char_pos < cols - x:  # CRITICAL: Only render if within screen bounds
                                             try:
                                                 pad.addstr(n, char_pos, char, curses.color_pair(annotation_color_pair))
-                                            except:
+                                            except curses.error:
                                                 pass  # Ignore if we can't write at this position
                     except Exception as e:
                         # If color parsing fails, just display as regular text
+                        if DEBUG_MODE:
+                            print(f"Syntax-highlight color parsing failed: {e}", file=sys.stderr)
                         apply_search_highlighting(pad, n, 0, text_part)
                 else:
                     # No color info, but still a syntax highlighted line - add background
@@ -5019,7 +5032,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         for bg_col in range(cols - x):
                             try:
                                 pad.addstr(n, bg_col, " ", curses.color_pair(table_bg_pair))
-                            except:
+                            except curses.error:
                                 pass  # Ignore if we can't write at this position
                 
                 # Add the actual text content
@@ -5062,7 +5075,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                             try:
                                 # Clear the table background for this URL by using normal color pair
                                 pad.addstr(n, url_match.start(), url_text, curses.color_pair(0) | curses.A_UNDERLINE)
-                            except:
+                            except curses.error:
                                 # Fallback to just underline if color reset fails
                                 pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
                             
@@ -5108,14 +5121,14 @@ def reader(stdscr, ebook, index, width, y, pctg):
                             pad.addstr(n, 0, centered_content, curses.A_ITALIC)
                         else:
                             pad.addstr(n, 0, centered_content, curses.A_DIM)
-                    except:
+                    except curses.error:
                         # Fallback to normal text if formatting fails
                         apply_search_highlighting(pad, n, 0, centered_content)
             else:
                 # Regular text line
                 display_line = line[9:] if line.startswith("IMG_LINE:") else line
                 apply_search_highlighting(pad, n, 0, str(display_line))
-        except:
+        except curses.error:
             pass
     # Remove end markers - just display clean text
 
@@ -5234,7 +5247,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 try:
                     if toc_src and index < len(toc_src):
                         chapter_title = toc_src[index]
-                except:
+                except (IndexError, TypeError):
                     pass
                 position_pct = int((y/totlines) * 100) if totlines > 0 else 0
                 add_bookmark(ebook, index, chapter_title, y, y/totlines)
@@ -5387,8 +5400,10 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                 os.startfile(url_to_open)
                             else:
                                 webbrowser.open(url_to_open)
-                        except:
+                        except Exception as e:
                             # Fallback to webbrowser module
+                            if DEBUG_MODE:
+                                print(f"Could not open URL via system opener: {e}", file=sys.stderr)
                             webbrowser.open(url_to_open)
                     else:
                         # Multiple URLs found, deduplicate first
@@ -5422,8 +5437,10 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                     os.startfile(url_to_open)
                                 else:
                                     webbrowser.open(url_to_open)
-                            except:
+                            except Exception as e:
                                 # Fallback to webbrowser module
+                                if DEBUG_MODE:
+                                    print(f"Could not open URL via system opener: {e}", file=sys.stderr)
                                 webbrowser.open(url_to_open)
                         else:
                             # Multiple unique URLs, show selection menu
@@ -5455,7 +5472,9 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                                      check=False)
                                     else:
                                         webbrowser.open(url_to_open)
-                                except:
+                                except Exception as e:
+                                    if DEBUG_MODE:
+                                        print(f"Could not open URL via system opener: {e}", file=sys.stderr)
                                     webbrowser.open(url_to_open)
                             # Clear screen and return to normal display
                             stdscr.clear()
@@ -5538,7 +5557,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     stdscr.addstr(0, 0, f"Resizing ({cols}x{rows}), please wait...")
                     stdscr.refresh()
                     time.sleep(0.5)  # Show briefly but long enough to read
-                except:
+                except curses.error:
                     pass
                 
                 # Always re-render on resize
@@ -5558,7 +5577,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 debug_info = f"DEBUG: Ch {index+1}/{len(contents)} | Pos {y}/{totlines} ({pctg_str}) | Built {__build_time__}"
                 try:
                     stdscr.addstr(1, 0, debug_info[:cols-1], curses.A_DIM)  # Show on line 2, truncate if too long
-                except:
+                except curses.error:
                     pass  # Ignore if we can't fit the debug line
             
             stdscr.refresh()
@@ -5641,7 +5660,7 @@ def preread(stdscr, file):
         stdscr.clear()
         stdscr.addstr(0, 0, "Loading...")
         stdscr.refresh()
-    except:
+    except curses.error:
         pass
 
     curses.start_color()  # Enable color support
@@ -5661,9 +5680,8 @@ def preread(stdscr, file):
         init_syntax_color_pairs()
         
     except Exception as e:
-        # Debug: show what went wrong
-        import sys
-        print(f"Color initialization failed: {e}", file=sys.stderr)
+        if DEBUG_MODE:
+            print(f"Color initialization failed: {e}", file=sys.stderr)
         COLORSUPPORT = False
 
     stdscr.keypad(True)
@@ -5677,7 +5695,7 @@ def preread(stdscr, file):
         stdscr.clear()
         stdscr.addstr(0, 0, "Loading EPUB...")
         stdscr.refresh()
-    except:
+    except curses.error:
         pass
 
     epub = Epub(file)
@@ -5765,14 +5783,17 @@ def preread(stdscr, file):
                     try:
                         with open(STATEFILE, 'w') as f:
                             json.dump(STATE, f, indent=2)
-                    except:
-                        pass
-                    
+                    except OSError as e:
+                        if DEBUG_MODE:
+                            print(f"Could not save state before bookmark restart: {e}", file=sys.stderr)
+
                     # Exit and restart with the new book
                     os.execv(sys.executable, [sys.executable] + [sys.argv[0]] + [bookmark_path])
-                    
+
                 except Exception as e:
                     # Failed to restart, skip this bookmark
+                    if DEBUG_MODE:
+                        print(f"Could not restart into bookmarked book {bookmark_path}: {e}", file=sys.stderr)
                     continue
             elif bookmark_path == epub.path:
                 # Same book, jump to bookmarked position
@@ -5865,7 +5886,7 @@ def main():
                 try:
                     os.remove(state_file)
                     cleaned_files.append(state_file)
-                except Exception as e:
+                except OSError as e:
                     print(f"Warning: Could not remove {state_file}: {e}")
         
         # Clean bookmark files
@@ -5874,7 +5895,7 @@ def main():
                 try:
                     os.remove(bookmark_file)
                     cleaned_files.append(bookmark_file)
-                except Exception as e:
+                except OSError as e:
                     print(f"Warning: Could not remove {bookmark_file}: {e}")
         
         if cleaned_files:
@@ -5957,8 +5978,9 @@ def main():
             try:
                 parser.feed(content)
                 parser.close()
-            except:
-                pass
+            except Exception as e:
+                if DEBUG_MODE:
+                    print(f"HTML parsing failed for {i}: {e}", file=sys.stderr)
             src_lines, imgs, img_alts = parser.get_lines()
             # sys.stdout.reconfigure(encoding="utf-8")  # Python>=3.7
             for j in src_lines:

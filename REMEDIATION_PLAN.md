@@ -80,10 +80,16 @@ That real-book validation caught three regressions that the synthetic test corpu
 
 | # | Audit ref | Action | Location | Effort |
 |---|---|---|---|---|
-| 3.1 | §6.4 | Audit the 66 bare/broad `except` blocks. For each: if it's guarding a truly optional/best-effort action (e.g. terminal capability probing, a `curses.error` on drawing past screen edge), narrow it to the specific exception type; if it's guarding something load-bearing (state save/load, EPUB parsing), let it surface or log via `DEBUG_MODE` rather than silently swallow. Prioritize the ones inside loops or hot paths first (image rendering, search) since those are most likely to be masking a repeated failure like §3.2. | throughout, `grep -n "except:" termbook.py` | 2-3 days (large but mechanical, can be spread across contributors) |
+| 3.1 | §6.4 | DONE. Audit the 66 bare/broad `except` blocks. For each: if it's guarding a truly optional/best-effort action (e.g. terminal capability probing, a `curses.error` on drawing past screen edge), narrow it to the specific exception type; if it's guarding something load-bearing (state save/load, EPUB parsing), let it surface or log via `DEBUG_MODE` rather than silently swallow. Prioritize the ones inside loops or hot paths first (image rendering, search) since those are most likely to be masking a repeated failure like §3.2. | throughout, `grep -n "except:" termbook.py` | 2-3 days (large but mechanical, can be spread across contributors) |
 | 3.2 | §6.7 | Where practical, reduce `global` surface area opportunistically while touching nearby code in Phases 1-3 (don't do a big-bang refactor here — that's Phase 4) — e.g. when touching `Modal` for other reasons, consider instance state instead of classmethods-over-class-state. | various | ongoing, no dedicated slot |
 
-**Exit criteria:** `except:`/`except Exception: pass` count materially reduced (track via the same grep used in the audit) with no behavior change to the "never crash the reader" guarantee for genuinely optional paths.
+**Exit criteria met:** all ~59 bare `except:`/plain `except Exception:` blocks in `termbook.py` reviewed individually. Outcome by category:
+- **Curses drawing (~35 sites)** — `pad.addstr`/`stdscr.addstr`/`getch` calls that can only fail with `curses.error` (writing past screen edge during resize, etc.) — narrowed to `except curses.error:`.
+- **Load-bearing I/O (bookmarks, state file, HTML/EPUB parsing, subprocess launches for URLs/images, Fabulous rendering)** — kept broad (`except Exception as e:`) since these wrap third-party/OS calls with genuinely varied failure modes, but now log via `if DEBUG_MODE: print(..., file=sys.stderr)` instead of silently discarding `e`, so `--debug` surfaces real repeated failures instead of masking them.
+- **Narrow, clearly-typed guards** (timestamp parsing, list/dict indexing, RGB math) — narrowed to the specific types (`ValueError, TypeError`, `IndexError`, etc.).
+- **Two intentionally-broad catches left as-is** (`detect_language`'s `guess_lexer` fallback for a known Pygments registry bug, and the decorative-image color-sampling heuristic) — both already reviewed/justified in Phase 2 and by inline comment.
+- One trivial `get_ui_color_pair` try/except wrapping code that could never raise was simplified away entirely.
+- No behavior change to the "never crash the reader" guarantee; full test suite (60 passed, 7 skipped) green throughout.
 
 ---
 
