@@ -101,7 +101,7 @@ def test_dump_mode_plain_text():
     try:
         # Run termbook with -d flag
         result = subprocess.run(
-            ['python3', 'termbook.py', '-d', epub_path],
+            ['python3', '-m', 'termbook', '-d', epub_path],
             capture_output=True,
             text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

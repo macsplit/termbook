@@ -3,21 +3,21 @@ from setuptools import setup
 import re
 import datetime
 
-# Update build time in termbook.py
+# Update build time in termbook/__init__.py
 def update_build_time():
     build_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    with open("termbook.py", "r") as f:
+
+    with open("termbook/__init__.py", "r") as f:
         content = f.read()
-    
+
     # Update the build time line
     pattern = r'__build_time__ = "[^"]*"'
     replacement = f'__build_time__ = "{build_time}"'
     new_content = re.sub(pattern, replacement, content)
-    
-    with open("termbook.py", "w") as f:
+
+    with open("termbook/__init__.py", "w") as f:
         f.write(new_content)
-    
+
     print(f"Updated build time to: {build_time}")
 
 # Update build time before building
@@ -35,7 +35,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/macsplit/termbook",
-    py_modules=["termbook"],
+    packages=["termbook", "termbook.ui"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
@@ -57,7 +57,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "termbook=termbook:main",
+            "termbook=termbook.cli:main",
         ],
     },
 )

@@ -1,0 +1,223 @@
+"""Curses color-pair allocation: RGB-to-256-color mapping and pair caching.
+
+Shared by image rendering and text/search/syntax-highlight drawing, all of
+which need to turn an RGB color into a curses color pair.
+"""
+
+import curses
+
+from termbook import state
+
+# Smart color palette system
+_color_palette = []  # Pre-computed palette of color indices
+_color_pairs = {}    # Cache of created color pairs  
+_image_cache = {}    # Cache processed images to avoid re-rendering on resize
+_next_color_pair = 4  # Start after pre-defined pairs (1,2,3)  
+_MAX_COLOR_PAIRS = 32000   # Safe limit - most terminals support 32768 or 65536
+_SEARCH_PAIR_START = 32001  # Reserved pairs for search highlighting  
+# Syntax highlighting pairs are now allocated dynamically
+# All pairs are now allocated dynamically from the same pool
+
+def get_ui_color_pair(purpose="loading"):
+    """Get a dedicated color pair for UI elements like loading messages."""
+    return 1  # Default color pair (reliable)
+
+def init_syntax_color_pairs():
+    """Pre-allocate color pairs for syntax highlighting."""
+    # Syntax highlighting pairs are now allocated dynamically as needed
+    # No pre-allocation required
+    pass
+
+def init_smart_color_palette():
+    """Initialize a smart color palette with commonly used colors."""
+    global _color_palette
+    if _color_palette:
+        return  # Already initialized
+    
+    palette = []
+    
+    # Use a finer 8x8x8 RGB cube for better color matching
+    # This gives us 512 color gradations instead of 216
+    # More gradations = less "hickeldy pickley" color jumps
+    for r in range(8):
+        for g in range(8):
+            for b in range(8):
+                # Map 0-7 to 0-255 with better distribution
+                red = int(r * 255 / 7)
+                green = int(g * 255 / 7)
+                blue = int(b * 255 / 7)
+                palette.append((red, green, blue))
+    
+    # Add 24 grayscale colors (matching indices 232-255)
+    for i in range(24):
+        gray = 8 + i * 10  # Range from 8 to 238
+        palette.append((gray, gray, gray))
+    
+    # Add the 16 basic ANSI colors (indices 0-15) for completeness
+    basic_colors = [
+        (0, 0, 0),       # 0 - Black
+        (205, 0, 0),     # 1 - Red (adjusted for terminal)
+        (0, 205, 0),     # 2 - Green
+        (205, 205, 0),   # 3 - Yellow
+        (0, 0, 238),     # 4 - Blue
+        (205, 0, 205),   # 5 - Magenta
+        (0, 205, 205),   # 6 - Cyan
+        (229, 229, 229), # 7 - White
+        (127, 127, 127), # 8 - Bright Black
+        (255, 0, 0),     # 9 - Bright Red
+        (0, 255, 0),     # 10 - Bright Green
+        (255, 255, 0),   # 11 - Bright Yellow
+        (92, 92, 255),   # 12 - Bright Blue
+        (255, 0, 255),   # 13 - Bright Magenta
+        (0, 255, 255),   # 14 - Bright Cyan
+        (255, 255, 255)  # 15 - Bright White
+    ]
+    for color in basic_colors:
+        if color not in palette:
+            palette.append(color)
+    
+    _color_palette = palette
+
+def find_closest_palette_color(target_rgb):
+    """Find the closest color in our palette using more discerning matching."""
+    if not _color_palette:
+        init_smart_color_palette()
+    
+    target_r, target_g, target_b = target_rgb
+    best_match = _color_palette[0]
+    best_distance = float('inf')
+    
+    # Set a more lenient threshold - allow closer palette matches
+    # to avoid returning original colors that won't work with curses
+    max_acceptable_distance = 800  # More lenient to use palette colors more often
+    
+    for palette_rgb in _color_palette:
+        # Use standard Euclidean distance for more consistent results
+        r_diff = target_r - palette_rgb[0]
+        g_diff = target_g - palette_rgb[1]
+        b_diff = target_b - palette_rgb[2]
+        distance = r_diff*r_diff + g_diff*g_diff + b_diff*b_diff
+        
+        if distance < best_distance:
+            best_distance = distance
+            best_match = palette_rgb
+    
+    # If the best match is still too far away, return the original color
+    # This prevents very different colors from being forced into wrong palette entries
+    if best_distance > max_acceptable_distance:
+        return target_rgb
+    
+    return best_match
+
+def rgb_to_color_index(r, g, b):
+    """Convert RGB to 256-color palette index."""
+    try:
+        r, g, b = max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
+        
+        # Much stricter grayscale detection - only perfectly gray colors
+        # Increased threshold to 35 to preserve subtle colors
+        max_diff = max(abs(r - g), abs(g - b), abs(r - b))
+        
+        # Only consider it grayscale if VERY close in values AND low saturation
+        # This preserves more colored pixels and prevents "hickeldy pickley" colors
+        if max_diff < 35:
+            # Check saturation - if there's any color bias, preserve it
+            avg = (r + g + b) / 3
+            color_bias = max(abs(r - avg), abs(g - avg), abs(b - avg))
+            
+            if color_bias < 18:  # Only truly neutral colors become grayscale
+                gray = int((r + g + b) / 3)
+                if gray < 8:
+                    return 0  # Black
+                elif gray > 248:  
+                    return 15  # White
+                else:
+                    # Map to grayscale 232-255 (24 levels)
+                    level = min(23, max(0, (gray - 8) * 23 // 240))
+                    return 232 + level
+        
+        # For colored pixels, use better quantization to match our 8x8x8 palette
+        # This provides smoother color gradations
+        r_level = min(7, int(r * 8 / 256))
+        g_level = min(7, int(g * 8 / 256))
+        b_level = min(7, int(b * 8 / 256))
+        # Map to appropriate color index in 256-color space
+        # We still need to map to the standard 6x6x6 cube for terminal compatibility
+        # So convert our 8-level to nearest 6-level
+        r_level_6 = min(5, int(r_level * 6 / 8))
+        g_level_6 = min(5, int(g_level * 6 / 8))
+        b_level_6 = min(5, int(b_level * 6 / 8))
+        return 16 + r_level_6 * 36 + g_level_6 * 6 + b_level_6
+    except (TypeError, ValueError):
+        return 7  # Default white
+
+def get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True):
+    """Get color pair, potentially reversing colors to reuse existing pairs."""
+    global _next_color_pair
+    
+    if not state.COLORSUPPORT:
+        return 0, False  # No color support, no reversal
+    
+    # Simplify colors using palette matching
+    if fg_color:
+        fg_color = find_closest_palette_color(fg_color)
+    if bg_color:
+        bg_color = find_closest_palette_color(bg_color)
+    
+    # Convert to color indices
+    fg_idx = rgb_to_color_index(*fg_color) if fg_color else -1
+    bg_idx = rgb_to_color_index(*bg_color) if bg_color else -1
+    
+    # Validate and adjust indices
+    if fg_idx < -1 or fg_idx > 255: fg_idx = 7  # Default to white
+    if bg_idx < -1 or bg_idx > 255: bg_idx = 0  # Default to black
+    
+    # Check if we already have this pair
+    key = (fg_idx, bg_idx)
+    if key in _color_pairs:
+        return _color_pairs[key], False
+    
+    # Check if we have the reversed pair (and reversal is allowed)
+    reversed_key = (bg_idx, fg_idx)
+    if allow_reversal and reversed_key in _color_pairs:
+        return _color_pairs[reversed_key], True  # Use reversed pair
+    
+    # Create new pair if we have room
+    if _next_color_pair < _MAX_COLOR_PAIRS:
+        try:
+            curses.init_pair(_next_color_pair, fg_idx, bg_idx)
+            _color_pairs[key] = _next_color_pair
+            result_pair = _next_color_pair
+            _next_color_pair += 1
+            return result_pair, False
+        except (curses.error, ValueError):
+            pass  # Fall through to default
+    
+    return 0, False  # Default pair
+
+def get_syntax_color_pair(color, bg_color=None):
+    """Get a pre-allocated color pair for syntax highlighting."""
+    if not state.COLORSUPPORT:
+        return 0
+    
+    # If no background specified, use black
+    if bg_color is None:
+        bg_color = (0, 0, 0)
+    
+    # Create a cache key that includes both fg and bg
+    cache_key = (tuple(color) if isinstance(color, (list, tuple)) else color, 
+                 tuple(bg_color) if isinstance(bg_color, (list, tuple)) else bg_color)
+    
+    # Try to find exact match in pre-allocated pairs
+    # Just get a color pair dynamically
+    pair = get_color_pair(color, bg_color)
+    return pair
+
+def get_color_pair(fg_color, bg_color=None):
+    """Legacy interface that uses the new smart color system."""
+    if bg_color is None:
+        bg_color = (0, 0, 0)  # Default black background
+    
+    color_pair, _ = get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=False)
+    return color_pair
+

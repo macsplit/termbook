@@ -1,0 +1,6 @@
+__version__ = "1.1.1"
+__build_time__ = "2026-07-03 03:29:28"
+__license__ = "MIT"
+__author__ = "Lee Hanken (based on epr by Benawi Adha)"
+__email__ = ""
+__url__ = "https://github.com/macsplit/termbook"
