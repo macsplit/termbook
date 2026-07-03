@@ -21,15 +21,13 @@ Key Binding:
     Scroll up        : UP
     Page down        : PGDN      RIGHT   SPC
     Page up          : PGUP      LEFT
-    Next chapter     : n
-    Prev chapter     : p
+    Next chapter     : n          (or next search match, if a search is active)
+    Prev chapter     : p          (or prev search match, if a search is active)
     Beginning of ch  : HOME
     End of ch        : END
     Open image       : i
     Open URL         : u
     Search           : /
-    Next Occurrence  : n
-    Prev Occurrence  : p
     ToC              : TAB       t
     Metadata         : m
     Save bookmark    : s
@@ -39,7 +37,7 @@ Key Binding:
 
 
 __version__ = "1.1.1"
-__build_time__ = "2025-08-26 02:56:27"
+__build_time__ = "2026-07-03 00:54:03"
 __license__ = "MIT"
 __author__ = "Lee Hanken (based on epr by Benawi Adha)"
 __email__ = ""
@@ -1926,22 +1924,6 @@ def check_images_in_visible_area(src_lines, y, rows):
     return False
 
 
-def get_visible_images(src_lines, src_imgs, src_img_alts, y, rows):
-    """Get a list of images visible in the current viewport."""
-    import re
-    visible_imgs = []
-    visible_img_alts = []
-    
-    for line in src_lines[y:y+rows]:
-        match = re.search(r'\[IMG:(\d+)\]', line)
-        if match:
-            img_idx = int(match.group(1))
-            if img_idx < len(src_imgs):
-                visible_imgs.append(src_imgs[img_idx])
-                visible_img_alts.append(src_img_alts[img_idx])
-                
-    return visible_imgs, visible_img_alts
-
 def extract_figure_number(text):
     """Extract figure number from text like 'Figure 1.2', 'Fig 3', etc."""
     if not text:
@@ -1985,17 +1967,7 @@ def get_enhanced_image_label(img_path, img_idx, img_alts, src_lines, img_line_nu
         for i in range(start, end):
             if i < len(src_lines):
                 line = src_lines[i]
-                
-                # DEBUG: Log search process
-                try:
-                    with open('/tmp/termbook_debug.log', 'a') as f:
-                        if i == img_line_num:
-                            f.write(f"  Searching around IMG line {i}: '{line[:60]}...'\n")
-                        elif 'Figure 1.7' in line:
-                            f.write(f"  *** Found 'Figure 1.7' at line {i}: '{line[:60]}...'\n")
-                except:
-                    pass
-                
+
                 # Handle explicit CAPTION: prefix
                 if line.startswith("CAPTION:"):
                     caption_text = line[8:]  # Remove "CAPTION:" prefix
@@ -2105,85 +2077,34 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
     """Get images that are visible or overlapping with the current viewport.
     Uses precise image line mapping if available."""
     import re
-    
-    # DEBUG: Log viewport parameters
-    try:
-        with open('/tmp/termbook_debug.log', 'a') as f:
-            f.write(f"get_visible_images called with y={y}, rows={rows}, total_lines={len(src_lines)}\n")
-            f.write(f"image_line_map length={len(image_line_map) if image_line_map else 0}, imgs length={len(imgs)}\n")
-            f.write(f"image_line_map type: {type(image_line_map)}\n")
-            if image_line_map:
-                viewport_map = image_line_map[viewport_start:viewport_end] if viewport_start < len(image_line_map) else []
-                f.write(f"viewport image mapping: {viewport_map}\n")
-    except:
-        pass
-    
+
     if not imgs:
         return []
-    
+
     visible_images = []
     seen_indices = set()
-    
-    # Define viewport with small overlap 
+
+    # Define viewport with small overlap
     viewport_start = max(0, y - 2)
     viewport_end = min(len(src_lines), y + rows + 2)
-    
-    # DEBUG: Log viewport range
-    try:
-        with open('/tmp/termbook_debug.log', 'a') as f:
-            f.write(f"  Viewport range: {viewport_start} to {viewport_end}\n")
-    except:
-        pass
-    
-    # Use precise image line mapping if available
-    try:
-        with open('/tmp/termbook_debug.log', 'a') as f:
-            f.write(f"Checking image_line_map: exists={image_line_map is not None}, len_match={len(image_line_map) == len(src_lines) if image_line_map else False}\n")
-            if image_line_map:
-                f.write(f"Length difference: image_line_map={len(image_line_map)}, src_lines={len(src_lines)}, diff={len(image_line_map) - len(src_lines)}\n")
-    except:
-        pass
-        
+
     # Relax the length matching - allow small differences due to processing variations
     if image_line_map and abs(len(image_line_map) - len(src_lines)) <= 10:
         # Scan visible lines and check image mapping
-        try:
-            with open('/tmp/termbook_debug.log', 'a') as f:
-                f.write(f"Using image_line_map method\n")
-        except:
-            pass
-            
         for line_num in range(viewport_start, viewport_end):
             if line_num < len(image_line_map):
                 img_idx = image_line_map[line_num]
-                try:
-                    with open('/tmp/termbook_debug.log', 'a') as f:
-                        f.write(f"  Line {line_num}: img_idx = {img_idx}\n")
-                except:
-                    pass
-                    
                 if img_idx is not None and img_idx < len(imgs) and img_idx not in seen_indices:
                     visible_images.append((imgs[img_idx], line_num, img_idx))
                     seen_indices.add(img_idx)
-                    try:
-                        with open('/tmp/termbook_debug.log', 'a') as f:
-                            f.write(f"    Found mapped image: {imgs[img_idx]} at line {line_num}\n")
-                    except:
-                        pass
     else:
         # Fallback to old method - scan for image markers
-        try:
-            with open('/tmp/termbook_debug.log', 'a') as f:
-                f.write(f"Using fallback search method\n")
-        except:
-            pass
-            
         for line_num in range(viewport_start, viewport_end):
             if line_num >= len(src_lines):
                 break
-                
+
             line = src_lines[line_num]
-            
+
             # Check for [IMG:n] markers (unrendered images)
             img_match = re.search(r'\[IMG:(\d+)\]', line)
             if img_match:
@@ -2191,15 +2112,7 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
                 if img_idx < len(imgs) and img_idx not in seen_indices:
                     visible_images.append((imgs[img_idx], line_num, img_idx))
                     seen_indices.add(img_idx)
-                    # DEBUG: Log found image
-                    try:
-                        with open('/tmp/termbook_debug.log', 'a') as f:
-                            f.write(f"  Found image: {imgs[img_idx]} at line {line_num} (idx {img_idx})\n")
-                            f.write(f"    Line content: '{line[:100]}...'\n")
-                            f.write(f"    Regex match: '{img_match.group()}'\n")
-                    except:
-                        pass
-            
+
             # Check for IMG_LINE: markers (rendered images)
             elif line.startswith("IMG_LINE:"):
                 # Without mapping, we can't determine which specific image this is
@@ -2254,10 +2167,7 @@ def open_image_in_system_viewer(ebook, chpath, img_path):
                          stderr=subprocess.DEVNULL,
                          check=False)
         elif os.name == 'nt':
-            subprocess.run(['start', tmp_path], shell=True, 
-                         stdout=subprocess.DEVNULL, 
-                         stderr=subprocess.DEVNULL,
-                         check=False)
+            os.startfile(tmp_path)
         else:
             # Fallback for other platforms (macOS, etc.)
             subprocess.run(['open', tmp_path], 
@@ -2652,14 +2562,7 @@ def offer_whole_book_search(stdscr, search_term, ebook, current_index, current_y
 def apply_search_highlighting(pad, n, x, text, default_attr=0):
     """Apply search highlighting to text if CURRENT_SEARCH_TERM is set"""
     global CURRENT_SEARCH_TERM
-    
-    # DEBUG: Always log function calls
-    try:
-        with open('/tmp/search_debug.log', 'a') as f:
-            f.write(f"FUNCTION_CALL: apply_search_highlighting called with text='{text[:30]}...', CURRENT_SEARCH_TERM='{CURRENT_SEARCH_TERM}'\n")
-    except:
-        pass
-    
+
     if not CURRENT_SEARCH_TERM or not text:
         # No search term or no text - just render normally
         try:
@@ -2672,14 +2575,7 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
     import re
     search_pattern = re.escape(CURRENT_SEARCH_TERM)
     last_pos = 0
-    
-    # DEBUG: Log that we're applying highlighting
-    try:
-        with open('/tmp/search_debug.log', 'a') as f:
-            f.write(f"APPLY_HIGHLIGHT: Checking '{text[:30]}...' for '{CURRENT_SEARCH_TERM}'\n")
-    except:
-        pass
-    
+
     for match in re.finditer(search_pattern, text, re.IGNORECASE):
         # Add text before match
         if match.start() > last_pos:
@@ -2708,13 +2604,6 @@ def apply_search_highlighting(pad, n, x, text, default_attr=0):
                         curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_YELLOW)
                     
                     pad.addstr(n, x + match.start(), match_text, curses.color_pair(search_color_pair))
-                    
-                    # DEBUG: Log successful highlight
-                    try:
-                        with open('/tmp/search_debug.log', 'a') as f:
-                            f.write(f"HIGHLIGHT_SUCCESS: Highlighted '{match_text}' at position {match.start()}\n")
-                    except:
-                        pass
                 except:
                     # Fallback to reverse video
                     pad.addstr(n, x + match.start(), match_text, curses.A_REVERSE | curses.A_BOLD)
@@ -3314,8 +3203,8 @@ def help(stdscr):
         "↓/↑        - Scroll down/up",
         "Space/→    - Next page", 
         "←          - Previous page",
-        "n          - Next chapter",
-        "p          - Previous chapter",
+        "n          - Next chapter (search: next)",
+        "p          - Previous chapter (search: prev)",
         "Home       - Beginning of chapter",
         "End        - End of chapter",
         "i          - Open visible image",
@@ -3428,11 +3317,16 @@ def open_media(scr, epub, src):
     try:
         with os.fdopen(fd, "wb") as tmp:
             tmp.write(epub.file.read(src))
-        subprocess.call(
-            VWR + [path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        if sys.platform == "win32":
+            # "start" is a cmd.exe builtin, not a real executable; os.startfile
+            # is the correct, injection-safe way to open it with the default handler.
+            os.startfile(path)
+        else:
+            subprocess.call(
+                VWR + [path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
         k = scr.getch()
     finally:
         os.remove(path)
@@ -3845,7 +3739,10 @@ def render_image_curses(pad, img, start_y, start_x, max_width, max_height):
     # Use smaller blocks for higher resolution
     img.thumbnail((max_width * 2, max_height * 2), Image.Resampling.LANCZOS)
     width, height = img.size
-    
+
+    # Pixel-access object is much faster than repeated img.getpixel() calls
+    pixel_access = img.load()
+
     # Use smaller Unicode block characters for better resolution
     # Each character represents 2x2 pixels using quarter-block characters
     blocks = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█']
@@ -3866,7 +3763,7 @@ def render_image_curses(pad, img, start_y, start_x, max_width, max_height):
                 for px in range(2):
                     pixel_y = min(y + py, height - 1)
                     pixel_x = min(x + px, width - 1)
-                    r, g, b = img.getpixel((pixel_x, pixel_y))
+                    r, g, b = pixel_access[pixel_x, pixel_y]
                     colors.append((r, g, b))
                     # Convert to grayscale for block selection
                     luminance = int(0.299 * r + 0.587 * g + 0.114 * b)
@@ -3908,12 +3805,6 @@ def render_image_curses(pad, img, start_y, start_x, max_width, max_height):
                     pad.addstr(start_y + y // 2, start_x + x // 2, char)
             except curses.error:
                 pass
-
-
-def supports_24bit_color():
-    """Assume terminal supports 24-bit color (truecolor)."""
-    # Always return True to assume truecolor support as requested
-    return True
 
 
 def render_image_with_fabulous(img_data, max_width, max_height):
@@ -4742,12 +4633,6 @@ def reader(stdscr, ebook, index, width, y, pctg):
     
     # Render text with color support for images
     for n, line in enumerate(src_lines):
-        # DEBUG: Log what type of line we're processing
-        try:
-            with open('/tmp/search_debug.log', 'a') as f:
-                f.write(f"RENDER_LINE: n={n}, line_type='{line[:20]}...'\n")
-        except:
-            pass
         try:
             # Check if this is an image line with color information
             if line.startswith("IMG_LINE:") and n < len(image_info) and image_info[n]:
@@ -4871,19 +4756,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         if CURRENT_SEARCH_TERM:
                             import re
                             search_pattern = re.escape(CURRENT_SEARCH_TERM)  # Escape special regex chars
-                            # DEBUG: Write to a temp file to see if this code is reached
-                            try:
-                                with open('/tmp/search_debug.log', 'a') as f:
-                                    f.write(f"SEARCH DEBUG: Looking for '{CURRENT_SEARCH_TERM}' in '{text_part[:50]}...'\n")
-                            except:
-                                pass
                             for match in re.finditer(search_pattern, text_part, re.IGNORECASE):
-                                # DEBUG: Found a match
-                                try:
-                                    with open('/tmp/search_debug.log', 'a') as f:
-                                        f.write(f"SEARCH DEBUG: Found match '{match.group()}' at {match.start()}-{match.end()}\n")
-                                except:
-                                    pass
                                 start_pos = match.start()
                                 end_pos = match.end()
                                 match_text = match.group()
@@ -5252,13 +5125,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 search_term = search_dialog(stdscr)
                 if search_term:
                     CURRENT_SEARCH_TERM = search_term  # Store for highlighting
-                    # DEBUG: Log that we set the search term
-                    try:
-                        with open('/tmp/search_debug.log', 'w') as f:
-                            f.write(f"SEARCH DEBUG: Set CURRENT_SEARCH_TERM to '{search_term}'\n")
-                    except:
-                        pass
-                    
+
                     # Initialize whole-book search tracking
                     WHOLE_BOOK_SEARCH_START = index
                     WHOLE_BOOK_SEARCH_VISITED = [index]
@@ -5386,10 +5253,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                              stderr=subprocess.DEVNULL,
                                              check=False)
                             elif os.name == 'nt':
-                                subprocess.run(['start', url_to_open], shell=True, 
-                                             stdout=subprocess.DEVNULL, 
-                                             stderr=subprocess.DEVNULL,
-                                             check=False)
+                                os.startfile(url_to_open)
                             else:
                                 webbrowser.open(url_to_open)
                         except:
@@ -5424,10 +5288,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
                                                  stderr=subprocess.DEVNULL,
                                                  check=False)
                                 elif os.name == 'nt':
-                                    subprocess.run(['start', url_to_open], shell=True, 
-                                                 stdout=subprocess.DEVNULL, 
-                                                 stderr=subprocess.DEVNULL,
-                                                 check=False)
+                                    os.startfile(url_to_open)
                                 else:
                                     webbrowser.open(url_to_open)
                             except:
@@ -5474,24 +5335,8 @@ def reader(stdscr, ebook, index, width, y, pctg):
                             except curses.error:
                                 pass
             elif k == ord("i"):
-                # DEBUG: Log that 'i' key was pressed
-                try:
-                    with open('/tmp/termbook_debug.log', 'a') as f:
-                        f.write(f"'i' key pressed! y={y}, rows={rows}\n")
-                except:
-                    pass
-                
                 visible_images = get_visible_images(src_lines, imgs, y, rows, image_line_map)
-                
-                # DEBUG: Log what get_visible_images returned
-                try:
-                    with open('/tmp/termbook_debug.log', 'a') as f:
-                        f.write(f"get_visible_images returned: {len(visible_images)} images\n")
-                        for i, (img_path, line_num, img_idx) in enumerate(visible_images):
-                            f.write(f"  Image {i}: {img_path} at line {line_num}\n")
-                except:
-                    pass
-                
+
                 if visible_images:
                     if len(visible_images) == 1:
                         # Single image, open directly
@@ -5528,13 +5373,6 @@ def reader(stdscr, ebook, index, width, y, pctg):
                     stdscr.clear()
                     stdscr.refresh()
                 else:
-                    # DEBUG: No images found
-                    try:
-                        with open('/tmp/termbook_debug.log', 'a') as f:
-                            f.write(f"No visible images found.\n")
-                    except:
-                        pass
-                    
                     # Show message to user
                     stdscr.addstr(rows-1, 0, " No images visible in current view ", curses.A_REVERSE)
                     stdscr.refresh()
