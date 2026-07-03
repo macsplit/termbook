@@ -1,0 +1,31 @@
+{
+  "app-id": "uk.leehanken.termbook",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "24.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "termbook",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=x11",
+    "--filesystem=home"
+  ],
+  "modules": [
+    {
+      "name": "termbook",
+      "buildsystem": "simple",
+      "build-commands": [
+        "python3 -m pip install --prefix=/app --upgrade pip",
+        "python3 -m pip install --prefix=/app Pillow==11.0.0 pygments==2.18.0 fabulous==0.4.0",
+        "python3 setup.py install --prefix=/app"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/macsplit/termbook.git",
+          "branch": "main"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>termbook — EPUB reader for the terminal</title>
+    <link rel="icon" type="image/png" href="favicon.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>termbook</h1>
+            <p class="tagline">EPUB reader for the terminal with syntax highlighting and image rendering</p>
+        </header>
+
+        <main>
+            <section class="screenshot">
+                <img src="screenshot.png" alt="termbook Screenshot">
+            </section>
+
+            <section class="about">
+                <h2>About</h2>
+                <p>termbook is a terminal-based EPUB reader that renders styled text, syntax-highlighted code blocks, and images directly in your terminal. Navigate by scrolling, page turns, or chapter jumps. Search across the entire book, bookmark passages, and switch color schemes.</p>
+                <p>Built as a curses UI with integrated pygments syntax highlighting, PIL image rendering, and support for fabulous block graphics on systems without Sixel.</p>
+            </section>
+
+            <section class="features">
+                <h2>Features</h2>
+                <ul>
+                    <li><strong>EPUB parsing:</strong> Full ZIP-based EPUB extraction, OPF/NCX metadata, and chapter content handling.</li>
+                    <li><strong>Text rendering:</strong> Formatted text spans (bold, italic, underline), HTML to terminal conversion, justified layout.</li>
+                    <li><strong>Syntax highlighting:</strong> Pygments-powered code block rendering with 20+ language support.</li>
+                    <li><strong>Image display:</strong> Multiple backends—PIL for quality, fabulous for compatibility, quarter-block fallback.</li>
+                    <li><strong>Navigation:</strong> Scroll, page, chapter navigation; full-book search; chapter table of contents.</li>
+                    <li><strong>Bookmarks:</strong> Save and jump to bookmarked lines within the book.</li>
+                    <li><strong>Color control:</strong> Switch between dark and light color schemes on supported terminals.</li>
+                    <li><strong>Input handling:</strong> Responsive keyboard control with count prefixes for jumps (e.g., <code>5k</code> to scroll up 5 lines).</li>
+                </ul>
+            </section>
+
+            <section class="install">
+                <h2>Installation</h2>
+                <p>termbook is available as a Flatpak with one-click URL install and a hosted package repository, or can be built from source.</p>
+
+                <div class="install-options">
+                    <div class="option">
+                        <h3>Flatpak (Recommended)</h3>
+                        <p>Install from the hosted Flatpak repository:</p>
+                        <p><a href="uk.leehanken.termbook.flatpakref" class="download-button">Install termbook via Flatpak</a></p>
+                        <p><small>Or install from command line:</small></p>
+<pre><code>flatpak install --user --from \
+  https://termbook.dev/uk.leehanken.termbook.flatpakref</code></pre>
+                        <p><small><strong>App ID:</strong> <code>uk.leehanken.termbook</code></small></p>
+                        <p><small><strong>Repository:</strong> <a href="termbook.flatpakrepo">termbook.flatpakrepo</a></small></p>
+                    </div>
+                    <div class="option">
+                        <h3>From Source</h3>
+                        <p>Requires Python 3.10+, Pillow, pygments, fabulous:</p>
+<pre><code>git clone https://github.com/macsplit/termbook.git
+cd termbook
+make install-local
+termbook <em>path/to/book.epub</em></code></pre>
+                        <p><small>See <a href="https://github.com/macsplit/termbook#installation">README</a> for full requirements.</small></p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="usage">
+                <h2>Usage</h2>
+                <p>Launch termbook with an EPUB file:</p>
+<pre><code>termbook book.epub</code></pre>
+                <p><strong>Navigation:</strong> <code>j</code>/<code>k</code> to scroll, <code>J</code>/<code>K</code> to jump pages, <code>n</code>/<code>p</code> for next/previous chapter, <code>g</code>/<code>G</code> for first/last chapter, <code>t</code> for table of contents, <code>?</code> for help.</p>
+                <p><strong>Search:</strong> Press <code>/</code> to search within the book. <strong>Bookmarks:</strong> <code>m</code> to save, <code>b</code> to open bookmarks. <strong>Colors:</strong> <code>c</code> to toggle color scheme (if supported).</p>
+            </section>
+
+            <section class="source">
+                <h2>Source & Attribution</h2>
+                <p>termbook is open source and actively developed on <a href="https://github.com/macsplit/termbook">GitHub</a>. Released under the MIT License.</p>
+                <p><small>termbook builds upon <a href="https://github.com/benawi/epr">epr</a> by Benawi Adha, adapted and extended with modern parsing, rendering, and UI improvements.</small></p>
+            </section>
+        </main>
+
+        <footer>
+            <p>&copy; 2026 <a href="https://github.com/macsplit">@macsplit</a>. Released under the <a href="https://github.com/macsplit/termbook/blob/main/LICENSE">MIT License</a>.</p>
+        </footer>
+    </div>
+</body>
+</html>
