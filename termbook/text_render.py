@@ -1452,14 +1452,6 @@ class HTMLtoLines(HTMLParser):
         # Convert to Match objects for compatibility
         urls = []
         for url, start, end in url_data:
-            class MockMatch:
-                def __init__(self, text, start, end):
-                    self._text = text
-                    self._start = start
-                    self._end = end
-                def group(self): return self._text
-                def start(self): return self._start
-                def end(self): return self._end
             urls.append(MockMatch(url, start, end))
         
         if not urls:
@@ -1719,6 +1711,19 @@ class HTMLtoLines(HTMLParser):
                 background_lines = self.add_table_background(highlighted_lines)
                 text += background_lines + [""]
         return text, self.imgs, self.img_alts
+
+
+class MockMatch:
+    """Minimal re.Match-alike for wrapping (url, start, end) tuples from
+    find_urls_in_text() so callers can use the familiar .group()/.start()/
+    .end() interface without a real regex match object."""
+    def __init__(self, text, start, end):
+        self._text = text
+        self._start = start
+        self._end = end
+    def group(self): return self._text
+    def start(self): return self._start
+    def end(self): return self._end
 
 
 def find_urls_in_text(text):

@@ -31,7 +31,7 @@ except ImportError:
 from termbook import state
 from termbook import __build_time__
 from termbook.epub import Epub, dots_path
-from termbook.text_render import HTMLtoLines, find_urls_in_text
+from termbook.text_render import HTMLtoLines, find_urls_in_text, MockMatch
 from termbook.colors import (
     get_color_pair, get_color_pair_with_reversal, get_syntax_color_pair,
     rgb_to_color_index, find_closest_palette_color, init_smart_color_palette,
@@ -1340,14 +1340,6 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 url_data = find_urls_in_text(content)
                 urls = []
                 for url, start, end in url_data:
-                    class MockMatch:
-                        def __init__(self, text, start, end):
-                            self._text = text
-                            self._start = start
-                            self._end = end
-                        def group(self): return self._text
-                        def start(self): return self._start
-                        def end(self): return self._end
                     urls.append(MockMatch(url, start, end))
                 if urls:
                     current_pos = 0
@@ -1407,14 +1399,6 @@ def reader(stdscr, ebook, index, width, y, pctg):
                         url_data = find_urls_in_text(content)
                     urls = []
                     for url, start, end in url_data:
-                        class MockMatch:
-                            def __init__(self, text, start, end):
-                                self._text = text
-                                self._start = start
-                                self._end = end
-                            def group(self): return self._text
-                            def start(self): return self._start
-                            def end(self): return self._end
                         urls.append(MockMatch(url, start, end))
                     if urls:
                         # Handle URLs within table background
@@ -1721,14 +1705,6 @@ def reader(stdscr, ebook, index, width, y, pctg):
             url_data = find_urls_in_text(i)
             complete_matches = []
             for url, start, end in url_data:
-                class MockMatch:
-                    def __init__(self, text, start, end):
-                        self._text = text
-                        self._start = start
-                        self._end = end
-                    def group(self): return self._text
-                    def start(self): return self._start
-                    def end(self): return self._end
                 complete_matches.append(MockMatch(url, start, end))
 
             covered_ranges = []  # Track character ranges covered by complete URLs
