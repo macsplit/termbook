@@ -8,7 +8,8 @@
     "--share=ipc",
     "--socket=wayland",
     "--socket=x11",
-    "--filesystem=home"
+    "--filesystem=home",
+    "--talk-name=org.freedesktop.portal.Desktop"
   ],
   "modules": [
     {
