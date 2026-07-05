@@ -29,7 +29,6 @@ except ImportError:
     Image = None
 
 from termbook import state
-from termbook import __build_time__
 from termbook.epub import Epub, dots_path
 from termbook.text_render import HTMLtoLines, find_urls_in_text, MockMatch
 from termbook.colors import (
@@ -1954,7 +1953,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
             if state.DEBUG_MODE:
                 # Handle None values safely
                 pctg_str = f"{pctg:.1f}%" if pctg is not None else "0.0%"
-                debug_info = f"DEBUG: Ch {index+1}/{len(contents)} | Pos {y}/{totlines} ({pctg_str}) | Built {__build_time__}"
+                debug_info = f"DEBUG: Ch {index+1}/{len(contents)} | Pos {y}/{totlines} ({pctg_str})"
                 try:
                     stdscr.addstr(1, 0, debug_info[:cols-1], curses.A_DIM)  # Show on line 2, truncate if too long
                 except curses.error:
