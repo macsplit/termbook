@@ -102,6 +102,46 @@ def _external_open_temp_dir():
     temp_dir = os.path.join(cache_home, "termbook", "external-open")
     os.makedirs(temp_dir, exist_ok=True)
     return temp_dir
+
+
+def _launch_external_target(target):
+    """Launch a file or URL with the system handler without tying it to curses.
+
+    In Flatpak, prefer `gio open` over `xdg-open` so the request stays on the
+    GLib/portal path and doesn't block the reader on chooser UI behavior.
+    """
+    if os.name == "nt":
+        os.startfile(target)
+        return True
+
+    if sys.platform == "darwin":
+        commands = [["open", target]]
+    elif _is_flatpak_runtime():
+        commands = [["gio", "open", target], ["xdg-open", target]]
+    else:
+        commands = [["xdg-open", target]]
+
+    for command in commands:
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            return True
+        except OSError as e:
+            if state.DEBUG_MODE:
+                print(
+                    f"Could not launch opener {' '.join(command)}: {e}",
+                    file=sys.stderr,
+                )
+
+    return False
 RESIZE_REQUESTED = False
 RESIZE_TIMER = None
 RESIZE_DELAY = 1.0
@@ -454,21 +494,7 @@ def open_image_in_system_viewer(ebook, chpath, img_path):
             tmp.write(img_data)
             tmp_path = tmp.name
 
-        # Open with system default viewer
-        if os.name == 'posix':
-            subprocess.run(['xdg-open', tmp_path],
-                         stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL,
-                         check=False)
-        elif os.name == 'nt':
-            os.startfile(tmp_path)
-        else:
-            # Fallback for other platforms (macOS, etc.)
-            subprocess.run(['open', tmp_path], 
-                         stdout=subprocess.DEVNULL, 
-                         stderr=subprocess.DEVNULL,
-                         check=False)
-        return True
+        return _launch_external_target(tmp_path)
     except Exception as e:
         if state.DEBUG_MODE:
             print(f"Could not open image in system viewer: {e}", file=sys.stderr)
