@@ -43,8 +43,8 @@ from termbook.colors import (
     init_syntax_color_pairs, reset_dynamic_color_pairs,
 )
 from termbook.image_render import (
-    render_images_inline, render_image_with_fabulous, render_image_with_quarter_blocks,
-    PIL_AVAILABLE,
+    prepare_image_placeholders, render_single_image_inline, render_images_inline,
+    render_image_with_fabulous, render_image_with_quarter_blocks, PIL_AVAILABLE,
 )
 from termbook.ui.dialogs import Modal, help as show_help_dialog
 from termbook.ui.search import (
@@ -187,6 +187,62 @@ LOADING_IN_PROGRESS = False
 WHOLE_BOOK_SEARCH_START = None
 WHOLE_BOOK_SEARCH_VISITED = []
 JUMPLIST = {}
+IMAGE_RENDER_CACHE = {}
+
+
+def _image_cache_key(book_path, chpath, width):
+    return (book_path, chpath, width)
+
+
+def _apply_cached_image_renders(src_lines, image_info, image_line_map, cached_images):
+    """Apply cached rendered image blocks to a fresh placeholder-backed chapter."""
+    if not cached_images:
+        return src_lines, image_info, image_line_map
+
+    new_lines = []
+    new_info = []
+    new_map = []
+
+    for line, info, img_idx in zip(src_lines, image_info, image_line_map):
+        if (
+            img_idx is not None
+            and img_idx in cached_images
+            and "[Loading image" in line
+        ):
+            rendered_lines, rendered_info, rendered_map = cached_images[img_idx]
+            new_lines.extend(rendered_lines)
+            new_info.extend(rendered_info)
+            new_map.extend(rendered_map)
+        else:
+            new_lines.append(line)
+            new_info.append(info)
+            new_map.append(img_idx)
+
+    return new_lines, new_info, new_map
+
+
+def _choose_next_pending_image(src_lines, image_line_map, loaded_images, y, rows):
+    """Choose the next not-yet-rendered image nearest the viewport, preferring ahead."""
+    candidates = []
+    viewport_end = y + rows
+
+    for line_idx, (line, img_idx) in enumerate(zip(src_lines, image_line_map)):
+        if img_idx is None or img_idx in loaded_images or "[Loading image" not in line:
+            continue
+
+        if y <= line_idx <= viewport_end:
+            score = (0, line_idx - y, line_idx)
+        elif line_idx > viewport_end:
+            score = (1, line_idx - viewport_end, line_idx)
+        else:
+            score = (2, y - line_idx, line_idx)
+        candidates.append((score, line_idx, img_idx))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1], candidates[0][2]
 
 
 def show_initial_help_message(stdscr, rows, cols):
@@ -283,7 +339,11 @@ def check_images_in_visible_area(src_lines, y, rows):
     # Check visible lines for images
     for line in src_lines[y:y+rows]:
         # Check for both unreplaced markers and rendered image lines
-        if line.startswith("IMG_LINE:") or re.search(r'\[IMG:\d+\]', line):
+        if (
+            line.startswith("IMG_LINE:")
+            or "[Loading image" in line
+            or re.search(r'\[IMG:\d+\]', line)
+        ):
             return True
     return False
 
@@ -1177,20 +1237,18 @@ def reader(stdscr, ebook, index, width, y, pctg):
     image_info = []
     image_line_map = []
     if PIL_AVAILABLE:
-        def _image_progress(current, total):
-            loading_update(f"Rendering images {current}/{total}...")
-
-        src_lines, image_info, image_line_map = render_images_inline(
-            ebook,
-            chpath,
-            src_lines,
-            imgs,
-            width,
-            progress_callback=_image_progress if imgs else None,
-        )
+        loading_update("Preparing page...")
+        src_lines, image_info, image_line_map = prepare_image_placeholders(src_lines, imgs)
     else:
         # Create empty image tracking array if not rendering images
         image_line_map = [None] * len(src_lines)
+
+    cache_key = _image_cache_key(ebook.path, chpath, width)
+    cached_images = IMAGE_RENDER_CACHE.get(cache_key, {}) if PIL_AVAILABLE else {}
+    if cached_images:
+        src_lines, image_info, image_line_map = _apply_cached_image_renders(
+            src_lines, image_info, image_line_map, cached_images
+        )
     
     totlines = len(src_lines)
 
@@ -2130,13 +2188,43 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 show_initial_help_message(stdscr, rows, cols)
                 stdscr.refresh()
         
-        # Use a timeout for getch so we can check the timer periodically
-        pad.timeout(1000)  # 1 second timeout
+        # Keep idle ticks short while there are still placeholders to realize.
+        loaded_images = set(cached_images.keys()) if PIL_AVAILABLE else set()
+        has_pending_images = (
+            PIL_AVAILABLE
+            and _choose_next_pending_image(src_lines, image_line_map, loaded_images, y, rows) is not None
+        )
+        pad.timeout(250 if has_pending_images else 1000)
         k = pad.getch()
         pad.timeout(-1)  # Reset to blocking
         
         # Handle timeout (no key pressed)
         if k == -1:  # Timeout occurred
+            if has_pending_images:
+                next_image = _choose_next_pending_image(
+                    src_lines, image_line_map, loaded_images, y, rows
+                )
+                if next_image is not None:
+                    line_idx, img_idx = next_image
+                    loading_update(f"Rendering images {len(loaded_images) + 1}/{len(imgs)}...")
+                    try:
+                        rendered_chunk = render_single_image_inline(
+                            ebook, chpath, imgs[img_idx], img_idx, width
+                        )
+                    except Exception as e:
+                        if state.DEBUG_MODE:
+                            print(f"Could not render deferred image {imgs[img_idx]}: {e}", file=sys.stderr)
+                        error_msg = f"[Error loading image: {imgs[img_idx]}]"
+                        rendered_chunk = (
+                            [error_msg.center(width)],
+                            [[]],
+                            [img_idx],
+                        )
+
+                    IMAGE_RENDER_CACHE.setdefault(cache_key, {})[img_idx] = rendered_chunk
+                    delta = max(0, len(rendered_chunk[0]) - 1)
+                    new_y = y + delta if line_idx < y else y
+                    return 0, width, new_y, None
             continue  # Go back to check timer and redraw
         
         # Clear initial help message on any actual key press

@@ -174,3 +174,38 @@ def test_launch_external_target_falls_back_to_xdg_open(monkeypatch):
     assert launched["stdin"] is reader.subprocess.DEVNULL
     assert launched["start_new_session"] is True
     assert launched["close_fds"] is True
+
+
+def test_apply_cached_image_renders_replaces_placeholders():
+    src_lines = ["before", "[Loading image 1/2]", "after"]
+    image_info = [[], [], []]
+    image_line_map = [None, 0, None]
+    cached_images = {
+        0: (
+            ["IMG_LINE:rendered", ""],
+            [[((0, 0, 0), (0, 0, 0))], []],
+            [0, None],
+        )
+    }
+
+    new_lines, new_info, new_map = reader._apply_cached_image_renders(
+        src_lines, image_info, image_line_map, cached_images
+    )
+
+    assert new_lines == ["before", "IMG_LINE:rendered", "", "after"]
+    assert new_map == [None, 0, None, None]
+    assert new_info[1]
+
+
+def test_choose_next_pending_image_prefers_viewport_then_ahead():
+    src_lines = [
+        "[Loading image 1/3]",
+        "text",
+        "[Loading image 2/3]",
+        "text",
+        "[Loading image 3/3]",
+    ]
+    image_line_map = [0, None, 1, None, 2]
+
+    assert reader._choose_next_pending_image(src_lines, image_line_map, {0}, 1, 2) == (2, 1)
+    assert reader._choose_next_pending_image(src_lines, image_line_map, {0, 1}, 1, 2) == (4, 2)

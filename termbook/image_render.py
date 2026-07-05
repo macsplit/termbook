@@ -508,6 +508,122 @@ def detect_image_colorfulness(img, sample_size=100):
     return is_monochrome, avg_saturation
 
 
+def _placeholder_text_for_image(img_idx, total_images):
+    if total_images <= 1:
+        return "[Loading image]"
+    return f"[Loading image {img_idx + 1}/{total_images}]"
+
+
+def prepare_image_placeholders(src_lines, imgs):
+    """Replace image markers with cheap one-line placeholders."""
+    new_lines = []
+    image_info = []
+    image_line_map = []
+    total_images = len(imgs)
+
+    for line in src_lines:
+        img_match = re.search(r"\[IMG:([0-9]+)\]", line)
+        if img_match:
+            img_idx = int(img_match.group(1))
+            if img_idx < total_images:
+                placeholder = _placeholder_text_for_image(img_idx, total_images)
+                new_lines.append(line.replace(f"[IMG:{img_idx}]", placeholder))
+                image_info.append([])
+                image_line_map.append(img_idx)
+                continue
+
+        new_lines.append(line)
+        image_info.append([])
+        image_line_map.append(None)
+
+    return new_lines, image_info, image_line_map
+
+
+def render_single_image_inline(ebook, chpath, impath, img_idx, max_width):
+    """Render one EPUB image into inline text rows plus color metadata."""
+    imgsrc = dots_path(chpath, impath)
+    img_data = ebook.file.read(imgsrc)
+    img = Image.open(BytesIO(img_data))
+
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    orig_width, orig_height = img.size
+    orig_aspect = orig_width / orig_height
+
+    if os.getenv('TERMBOOK_DEBUG'):
+        print(f"DEBUG: Image {impath} is {orig_width}x{orig_height} pixels", file=sys.stderr)
+
+    if _is_decorative_image(img, impath):
+        if orig_width <= 16 and orig_height <= 16:
+            decorative_char = "·"
+        elif orig_width <= 40 and orig_height <= 40:
+            decorative_char = "•"
+        elif orig_aspect > 5 or orig_aspect < 0.2:
+            decorative_char = "―" if orig_aspect > 5 else "|"
+        else:
+            decorative_char = ""
+        return [decorative_char], [[]], [img_idx]
+
+    max_chars_available = max_width - 8
+    terminal_char_aspect = 2.0
+    max_width_by_screen = min(max_chars_available - 4, 80)
+    max_height_available = 30
+    natural_char_width = min(orig_width, max_width_by_screen)
+    width_percentage = natural_char_width / max_width_by_screen
+
+    if width_percentage < 0.50:
+        target_char_width = int(max_width_by_screen * 0.75)
+        target_char_height = int(target_char_width / orig_aspect / terminal_char_aspect)
+
+        if target_char_height > max_height_available:
+            target_char_height = max_height_available
+            target_char_width = int(target_char_height * orig_aspect * terminal_char_aspect)
+            target_char_width = min(target_char_width, max_width_by_screen)
+
+        char_width = target_char_width
+        char_height = target_char_height
+    else:
+        if natural_char_width <= max_width_by_screen:
+            char_width = natural_char_width
+            char_height = int(char_width / orig_aspect / terminal_char_aspect)
+        else:
+            char_width = max_width_by_screen
+            char_height = int(char_width / orig_aspect / terminal_char_aspect)
+
+        if char_height > max_height_available:
+            char_height = max_height_available
+            char_width = int(char_height * orig_aspect * terminal_char_aspect)
+
+    if orig_width >= 100 and orig_height >= 100:
+        char_width = max(12, min(char_width, max_width_by_screen))
+        char_height = max(6, min(char_height, max_height_available))
+    else:
+        min_width = max(6, orig_width // 4)
+        min_height = max(4, orig_height // 4)
+        char_width = max(min_width, min(char_width, max_width_by_screen))
+        char_height = max(min_height, min(char_height, max_height_available))
+
+    rendered_lines = render_image_with_quadrant_blocks(img, char_width, char_height)
+    output_lines = []
+    image_info = []
+    image_line_map = []
+
+    for rendered_line, line_colors in rendered_lines:
+        padding = " " * ((max_width - len(rendered_line)) // 2)
+        centered_line = padding + rendered_line
+        padded_colors = [((0, 0, 0), (0, 0, 0))] * len(padding) + line_colors
+
+        output_lines.append("IMG_LINE:" + centered_line)
+        image_info.append(padded_colors)
+        image_line_map.append(img_idx)
+
+    output_lines.append("")
+    image_info.append([])
+    image_line_map.append(None)
+    return output_lines, image_info, image_line_map
+
+
 def render_images_inline(ebook, chpath, src_lines, imgs, max_width, progress_callback=None):
     """Convert image placeholders to block-based representation inline with color info."""
     if not PIL_AVAILABLE or not imgs:
@@ -532,119 +648,13 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width, progress_cal
                     if progress_callback is not None:
                         progress_callback(processed_images, total_images)
 
-                    # Get image path
                     impath = imgs[img_idx]
-                    imgsrc = dots_path(chpath, impath)
-                    
-                    # Read image data
-                    img_data = ebook.file.read(imgsrc)
-                    img = Image.open(BytesIO(img_data))
-                    
-                    # Smart scaling based on image size and available screen space
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    
-                    # Get original image dimensions to make intelligent scaling decisions
-                    orig_width, orig_height = img.size
-                    orig_aspect = orig_width / orig_height
-                    
-                    # Debug: show image dimensions in debug mode
-                    if os.getenv('TERMBOOK_DEBUG'):
-                        print(f"DEBUG: Image {impath} is {orig_width}x{orig_height} pixels", file=sys.stderr)
-                    
-                    if _is_decorative_image(img, impath):
-                        # Replace with minimal characters based on size and type
-                        if orig_width <= 16 and orig_height <= 16:
-                            # Very tiny - just use a dot
-                            decorative_char = "·"  # Middle dot for very small images
-                        elif orig_width <= 40 and orig_height <= 40:
-                            # Small - use a simple bullet
-                            decorative_char = "•"
-                        elif orig_aspect > 5 or orig_aspect < 0.2:
-                            # Thin/wide decorative - use a line
-                            decorative_char = "―" if orig_aspect > 5 else "|"
-                        else:
-                            # Larger decorative - just skip it entirely
-                            decorative_char = ""  # Remove completely for larger decorative images
-                        new_lines.append(line.replace(f"[IMG:{img_idx}]", decorative_char))
-                        continue
-                    
-                    # Calculate available screen space
-                    max_chars_available = max_width - 8
-                    
-                    # Terminal cells are still physically taller than they are
-                    # wide. The 2x2 quadrant renderer increases detail inside
-                    # the cell, but it does not change the cell's on-screen
-                    # aspect ratio.
-                    terminal_char_aspect = 2.0
-                    
-                    # Width-based scaling approach: expand small images to 75% of available width
-                    max_width_by_screen = min(max_chars_available - 4, 80)  # Cap at 80 chars
-                    max_height_available = 30  # Conservative max height
-                    
-                    # Calculate what percentage of screen width this image would naturally take
-                    # Quadrant blocks improve horizontal detail inside each cell,
-                    # but they do not justify halving the number of screen cells.
-                    natural_char_width = min(orig_width, max_width_by_screen)  # Rough conversion
-                    width_percentage = natural_char_width / max_width_by_screen
-                    
-                    if width_percentage < 0.50:  # Image is less than 50% of available width
-                        # Scale up to 75% of available width
-                        target_char_width = int(max_width_by_screen * 0.75)
-                        target_char_height = int(target_char_width / orig_aspect / terminal_char_aspect)
-                        
-                        # Ensure it fits vertically
-                        if target_char_height > max_height_available:
-                            target_char_height = max_height_available
-                            target_char_width = int(target_char_height * orig_aspect * terminal_char_aspect)
-                            target_char_width = min(target_char_width, max_width_by_screen)
-                        
-                        char_width = target_char_width
-                        char_height = target_char_height
-                    else:
-                        # Image is already reasonably sized, just fit it properly
-                        if natural_char_width <= max_width_by_screen:
-                            char_width = natural_char_width
-                            char_height = int(char_width / orig_aspect / terminal_char_aspect)
-                        else:
-                            # Too wide, constrain by width
-                            char_width = max_width_by_screen
-                            char_height = int(char_width / orig_aspect / terminal_char_aspect)
-                        
-                        # Ensure it fits vertically
-                        if char_height > max_height_available:
-                            char_height = max_height_available
-                            char_width = int(char_height * orig_aspect * terminal_char_aspect)
-                    
-                    # Final bounds checking - adjust minimums based on original image size
-                    if orig_width >= 100 and orig_height >= 100:
-                        # Reasonably sized original, enforce decent minimums
-                        char_width = max(12, min(char_width, max_width_by_screen))  # Minimum 12 chars wide
-                        char_height = max(6, min(char_height, max_height_available))  # Minimum 6 chars tall
-                    else:
-                        # Small original image, use smaller minimums to preserve aspect ratio
-                        min_width = max(6, orig_width // 4)  # Scale based on original
-                        min_height = max(4, orig_height // 4)
-                        char_width = max(min_width, min(char_width, max_width_by_screen))
-                        char_height = max(min_height, min(char_height, max_height_available))
-                    
-                    # Prefer a bounded-palette renderer for the curses pad to avoid
-                    # exploding the number of distinct fg/bg pairs.
-                    rendered_lines = render_image_with_quadrant_blocks(img, char_width, char_height)
-
-                    for rendered_line, line_colors in rendered_lines:
-                        padding = " " * ((max_width - len(rendered_line)) // 2)
-                        centered_line = padding + rendered_line
-                        padded_colors = [((0, 0, 0), (0, 0, 0))] * len(padding) + line_colors
-
-                        new_lines.append("IMG_LINE:" + centered_line)
-                        image_info.append(padded_colors)
-                        image_line_map.append(img_idx)  # Track which image this line belongs to
-                    
-                    new_lines.append("")  # Empty line after image
-                    image_line_map.append(None)  # Empty line doesn't belong to any image
-                    image_info.append([])  # Empty color info for empty line
-                    
+                    rendered_lines, rendered_info, rendered_map = render_single_image_inline(
+                        ebook, chpath, impath, img_idx, max_width
+                    )
+                    new_lines.extend(rendered_lines)
+                    image_info.extend(rendered_info)
+                    image_line_map.extend(rendered_map)
                 except Exception as e:
                     # If image can't be processed, show error message
                     if state.DEBUG_MODE:
