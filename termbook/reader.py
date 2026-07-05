@@ -24,6 +24,12 @@ import webbrowser
 from io import BytesIO
 
 try:
+    from gi.repository import Gio, GLib
+except ImportError:
+    Gio = None
+    GLib = None
+
+try:
     from PIL import Image
 except ImportError:
     Image = None
@@ -142,6 +148,37 @@ def _launch_external_target(target):
                 )
 
     return False
+
+
+def _open_file_via_portal(path):
+    """Open a local file through the OpenURI portal's OpenFile method."""
+    if Gio is None or GLib is None:
+        return False
+
+    try:
+        connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        fd_list = Gio.UnixFDList.new()
+        with open(path, "rb") as opened_file:
+            fd_index = fd_list.append(opened_file.fileno())
+            options = GLib.Variant("a{sv}", {"ask": GLib.Variant("b", False)})
+            parameters = GLib.Variant("(sha{sv})", ("", fd_index, options))
+            connection.call_with_unix_fd_list_sync(
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.OpenURI",
+                "OpenFile",
+                parameters,
+                GLib.VariantType.new("(o)"),
+                Gio.DBusCallFlags.NONE,
+                -1,
+                fd_list,
+                None,
+            )
+        return True
+    except Exception as e:
+        if state.DEBUG_MODE:
+            print(f"Could not open file via portal: {e}", file=sys.stderr)
+        return False
 RESIZE_REQUESTED = False
 RESIZE_TIMER = None
 RESIZE_DELAY = 1.0
@@ -494,6 +531,8 @@ def open_image_in_system_viewer(ebook, chpath, img_path):
             tmp.write(img_data)
             tmp_path = tmp.name
 
+        if _is_flatpak_runtime():
+            return _open_file_via_portal(tmp_path) or _launch_external_target(tmp_path)
         return _launch_external_target(tmp_path)
     except Exception as e:
         if state.DEBUG_MODE:
