@@ -63,3 +63,21 @@ def test_get_inline_palette_size_override(monkeypatch):
     monkeypatch.setenv("TERMBOOK_INLINE_PALETTE", "72")
 
     assert image_render.get_inline_palette_size() == 72
+
+
+def test_is_decorative_image_detects_wide_pale_banner():
+    img = Image.new("RGB", (3200, 440), (255, 255, 255))
+    for x in range(0, 3200, 120):
+        img.putpixel((x, 200), (80, 80, 80))
+
+    assert image_render._is_decorative_image(img, "chapter-banner.png") is True
+
+
+def test_is_decorative_image_keeps_large_meaningful_diagram():
+    img = Image.new("RGB", (1200, 800), (255, 255, 255))
+    for y in range(80, 720):
+        for x in range(120, 1080):
+            if (x // 80 + y // 80) % 2 == 0:
+                img.putpixel((x, y), (20, 90, 180))
+
+    assert image_render._is_decorative_image(img, "model-diagram.png") is False

@@ -80,6 +80,65 @@ def get_inline_palette_size():
     return 32
 
 
+def _is_decorative_image(img, img_path=""):
+    """Heuristics for skipping decorative EPUB images inline."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    orig_width, orig_height = img.size
+    if orig_width <= 0 or orig_height <= 0:
+        return True
+
+    orig_aspect = orig_width / orig_height
+    total_area = orig_width * orig_height
+    img_path_lower = img_path.lower()
+
+    if orig_width <= 120 and orig_height <= 120:
+        return True
+
+    if orig_width <= 50 or orig_height <= 50:
+        return True
+
+    if total_area <= 4000:
+        return True
+
+    decorative_patterns = [
+        "bullet", "ornament", "decoration", "divider", "separator", "icon",
+        "mark", "symbol", "star", "dot", "border", "line", "rule",
+        "flourish", "accent", "deco", "spacer", "gap", "filler",
+    ]
+    if any(pattern in img_path_lower for pattern in decorative_patterns):
+        return True
+
+    if orig_aspect > 10 or orig_aspect < 0.1:
+        return True
+
+    try:
+        sample_img = img.resize((16, 16))
+        colors = sample_img.getcolors(maxcolors=256)
+        if colors and len(colors) <= 6:
+            return True
+        if total_area <= 2000 and colors and len(colors) <= 10:
+            return True
+
+        # Wide, pale chapter-opening banners can consume the whole first
+        # screen on short terminals while conveying almost no information.
+        light_pixels = sum(
+            count for count, color in colors
+            if (color[0] + color[1] + color[2]) / 3 >= 245
+        ) if colors else 0
+        light_ratio = light_pixels / 256 if colors else 0
+        if orig_aspect >= 5 and orig_height <= 600 and light_ratio >= 0.6:
+            return True
+    except Exception:
+        pass
+
+    if (orig_width > 200 and orig_height < 30) or (orig_height > 200 and orig_width < 30):
+        return True
+
+    return False
+
+
 def _color_distance(a, b):
     r_diff = a[0] - b[0]
     g_diff = a[1] - b[1]
@@ -487,54 +546,7 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     if os.getenv('TERMBOOK_DEBUG'):
                         print(f"DEBUG: Image {impath} is {orig_width}x{orig_height} pixels", file=sys.stderr)
                     
-                    # Enhanced decorative image filtering
-                    is_decorative = False
-                    
-                    # Size-based filtering: expand threshold to catch more decorative images
-                    if orig_width <= 120 and orig_height <= 120:
-                        is_decorative = True
-                    
-                    # Also filter out very small images that are clearly decorative
-                    if orig_width <= 50 or orig_height <= 50:
-                        is_decorative = True
-                    
-                    # Area-based filtering: images with very small total area are decorative
-                    total_area = orig_width * orig_height
-                    if total_area <= 4000:  # Less than ~63x63 pixels
-                        is_decorative = True
-                    
-                    # Check filename patterns that suggest decorative images
-                    img_path_lower = impath.lower()
-                    decorative_patterns = ['bullet', 'ornament', 'decoration', 'divider', 
-                                         'separator', 'icon', 'mark', 'symbol', 'star', 'dot',
-                                         'border', 'line', 'rule', 'flourish', 'accent', 'deco',
-                                         'spacer', 'gap', 'filler']
-                    if any(pattern in img_path_lower for pattern in decorative_patterns):
-                        is_decorative = True
-                    
-                    # Aspect ratio filtering: very wide or very tall images are often decorative
-                    if orig_aspect > 10 or orig_aspect < 0.1:  # 10:1 or 1:10 ratio
-                        is_decorative = True
-                    
-                    # Check for simple/repetitive content - images with very few colors
-                    try:
-                        # Sample the image to check color variety
-                        sample_img = img.resize((16, 16))  # Small sample for quick processing
-                        colors = sample_img.getcolors(maxcolors=256)
-                        if colors and len(colors) <= 6:  # Very few colors = likely decorative
-                            is_decorative = True
-                        
-                        # For very small images, be even more aggressive
-                        if total_area <= 2000 and colors and len(colors) <= 10:
-                            is_decorative = True
-                    except Exception:
-                        pass
-                    
-                    # Check for very thin images that span most of a line (borders, rules)
-                    if (orig_width > 200 and orig_height < 30) or (orig_height > 200 and orig_width < 30):
-                        is_decorative = True
-                    
-                    if is_decorative:
+                    if _is_decorative_image(img, impath):
                         # Replace with minimal characters based on size and type
                         if orig_width <= 16 and orig_height <= 16:
                             # Very tiny - just use a dot
