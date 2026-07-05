@@ -64,7 +64,7 @@ flatpak-builder \
     --repo=build/flatpak/repo \
     --force-clean \
     build/flatpak/build \
-    flatpak/dev.termbook.Termbook.json
+    flatpak/uk.leehanken.termbook.json
 ```
 
 ### 2. Create Repository Files

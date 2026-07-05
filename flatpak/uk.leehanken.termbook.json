@@ -15,15 +15,13 @@
       "name": "termbook",
       "buildsystem": "simple",
       "build-commands": [
-        "python3 -m pip install --prefix=/app --upgrade pip",
-        "python3 -m pip install --prefix=/app Pillow==11.0.0 pygments==2.18.0 fabulous==0.4.0",
+        "python3 -m pip install --prefix=/app --ignore-installed --no-index --find-links=flatpak/vendor Pillow==11.0.0 pygments==2.18.0",
         "python3 setup.py install --prefix=/app"
       ],
       "sources": [
         {
-          "type": "git",
-          "url": "https://github.com/macsplit/termbook.git",
-          "branch": "main"
+          "type": "dir",
+          "path": ".."
         }
       ]
     }

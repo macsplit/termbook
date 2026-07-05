@@ -20,6 +20,7 @@ NUC_DEPLOY_DIR="${NUC_DEPLOY_DIR:-/var/www/termbook}"
 FLATPAK_ARCH="${FLATPAK_ARCH:-x86_64}"
 FLATPAK_BRANCH="${FLATPAK_BRANCH:-master}"
 APP_ID="dev.termbook.Termbook"
+MANIFEST_PATH="flatpak/uk.leehanken.termbook.json"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/build/flatpak"
@@ -123,7 +124,7 @@ flatpak-builder \
     --repo="$OSTREE_REPO" \
     --force-clean \
     "${BUILD_DIR}/build" \
-    "flatpak/${APP_ID}.json"
+    "$MANIFEST_PATH"
 
 info "Flatpak built successfully"
 
@@ -169,8 +170,6 @@ step "Preparing deployment files"
 cp "${WEBSITE_SRC}/index.html" "${TEMP_DIR}/"
 cp "${WEBSITE_SRC}/style.css" "${TEMP_DIR}/"
 cp "${WEBSITE_SRC}/screenshot.png" "${TEMP_DIR}/"
-cp "${TEMP_DIR}/${APP_ID}.flatpakref" "${TEMP_DIR}/"
-cp "${TEMP_DIR}/termbook.flatpakrepo" "${TEMP_DIR}/"
 
 # Deploy to NUC
 step "Deploying to NUC"
