@@ -119,3 +119,26 @@ def test_render_images_inline_reports_progress(monkeypatch):
     assert progress_calls == [(1, 1)]
     assert lines[0].startswith("IMG_LINE:")
     assert line_map[0] == 0
+
+
+def test_render_single_image_inline_drops_decorative_images(monkeypatch):
+    img = Image.new("RGB", (32, 8), (255, 255, 255))
+    payload = BytesIO()
+    img.save(payload, format="PNG")
+
+    class FakeFile:
+        def read(self, _path):
+            return payload.getvalue()
+
+    class FakeBook:
+        file = FakeFile()
+
+    monkeypatch.setattr(image_render, "_is_decorative_image", lambda _img, _path="": True)
+
+    lines, info, line_map = image_render.render_single_image_inline(
+        FakeBook(), "chapter.xhtml", "image.png", 0, 40
+    )
+
+    assert lines == [image_render._decorative_omission_text().center(40)]
+    assert info == [[]]
+    assert line_map == [None]

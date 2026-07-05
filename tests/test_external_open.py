@@ -209,3 +209,20 @@ def test_choose_next_pending_image_prefers_viewport_then_ahead():
 
     assert reader._choose_next_pending_image(src_lines, image_line_map, {0}, 1, 2) == (2, 1)
     assert reader._choose_next_pending_image(src_lines, image_line_map, {0, 1}, 1, 2) == (4, 2)
+
+
+def test_choose_pending_images_batch_prefers_viewport_then_ahead():
+    src_lines = [
+        "[Loading image 1/4]",
+        "text",
+        "[Loading image 2/4]",
+        "text",
+        "[Loading image 3/4]",
+        "text",
+        "[Loading image 4/4]",
+    ]
+    image_line_map = [0, None, 1, None, 2, None, 3]
+
+    batch = reader._choose_pending_images_batch(src_lines, image_line_map, {0}, 1, 2, 2)
+
+    assert batch == [(2, 1), (4, 2)]

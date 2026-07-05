@@ -514,6 +514,10 @@ def _placeholder_text_for_image(img_idx, total_images):
     return f"[Loading image {img_idx + 1}/{total_images}]"
 
 
+def _decorative_omission_text():
+    return "[Decorative image omitted]"
+
+
 def prepare_image_placeholders(src_lines, imgs):
     """Replace image markers with cheap one-line placeholders."""
     new_lines = []
@@ -555,15 +559,8 @@ def render_single_image_inline(ebook, chpath, impath, img_idx, max_width):
         print(f"DEBUG: Image {impath} is {orig_width}x{orig_height} pixels", file=sys.stderr)
 
     if _is_decorative_image(img, impath):
-        if orig_width <= 16 and orig_height <= 16:
-            decorative_char = "·"
-        elif orig_width <= 40 and orig_height <= 40:
-            decorative_char = "•"
-        elif orig_aspect > 5 or orig_aspect < 0.2:
-            decorative_char = "―" if orig_aspect > 5 else "|"
-        else:
-            decorative_char = ""
-        return [decorative_char], [[]], [img_idx]
+        omitted = _decorative_omission_text().center(max_width)
+        return [omitted], [[]], [None]
 
     max_chars_available = max_width - 8
     terminal_char_aspect = 2.0

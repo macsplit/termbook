@@ -188,6 +188,11 @@ WHOLE_BOOK_SEARCH_START = None
 WHOLE_BOOK_SEARCH_VISITED = []
 JUMPLIST = {}
 IMAGE_RENDER_CACHE = {}
+PROGRESSIVE_IMAGE_BATCH_SIZE = 1
+PROGRESSIVE_IMAGE_IDLE_DELAY = 1.25
+PROGRESSIVE_IMAGE_POLL_MS = 200
+PROGRESSIVE_IMAGE_LOOKBEHIND_SCREENS = 1
+PROGRESSIVE_IMAGE_LOOKAHEAD_SCREENS = 2
 
 
 def _image_cache_key(book_path, chpath, width):
@@ -221,13 +226,27 @@ def _apply_cached_image_renders(src_lines, image_info, image_line_map, cached_im
     return new_lines, new_info, new_map
 
 
-def _choose_next_pending_image(src_lines, image_line_map, loaded_images, y, rows):
+def _choose_next_pending_image(
+    src_lines,
+    image_line_map,
+    loaded_images,
+    y,
+    rows,
+    lookbehind_lines=None,
+    lookahead_lines=None,
+):
     """Choose the next not-yet-rendered image nearest the viewport, preferring ahead."""
     candidates = []
     viewport_end = y + rows
+    window_start = 0 if lookbehind_lines is None else max(0, y - lookbehind_lines)
+    window_end = len(src_lines) - 1
+    if lookahead_lines is not None:
+        window_end = min(window_end, viewport_end + lookahead_lines)
 
     for line_idx, (line, img_idx) in enumerate(zip(src_lines, image_line_map)):
         if img_idx is None or img_idx in loaded_images or "[Loading image" not in line:
+            continue
+        if line_idx < window_start or line_idx > window_end:
             continue
 
         if y <= line_idx <= viewport_end:
@@ -243,6 +262,38 @@ def _choose_next_pending_image(src_lines, image_line_map, loaded_images, y, rows
 
     candidates.sort(key=lambda item: item[0])
     return candidates[0][1], candidates[0][2]
+
+
+def _choose_pending_images_batch(
+    src_lines,
+    image_line_map,
+    loaded_images,
+    y,
+    rows,
+    batch_size,
+    lookbehind_lines=None,
+    lookahead_lines=None,
+):
+    """Choose up to batch_size pending images near the viewport."""
+    chosen = []
+    chosen_set = set()
+
+    while len(chosen) < batch_size:
+        next_image = _choose_next_pending_image(
+            src_lines,
+            image_line_map,
+            loaded_images | chosen_set,
+            y,
+            rows,
+            lookbehind_lines=lookbehind_lines,
+            lookahead_lines=lookahead_lines,
+        )
+        if next_image is None:
+            break
+        chosen.append(next_image)
+        chosen_set.add(next_image[1])
+
+    return chosen
 
 
 def show_initial_help_message(stdscr, rows, cols):
@@ -1006,6 +1057,7 @@ def searching(stdscr, pad, src, width, y, ch, tot):
         sidx + 1,
         len(found),
         ch+1, tot)
+
     while True:
         if s in QUIT:
             SEARCHPATTERN = None
@@ -1111,6 +1163,254 @@ def update_loading_animation(stdscr, message, start_col, center_row, attr, step)
         pass  # Ignore any display errors
 
 
+def show_deferred_image_hint(stdscr, message="Loading nearby images..."):
+    """Show a low-noise status hint while deferred image work runs."""
+    try:
+        rows, cols = stdscr.getmaxyx()
+        row = max(0, rows - 1)
+        text = f" {message} "
+        start_col = max(0, (cols - len(text)) // 2)
+
+        if state.COLORSUPPORT:
+            attr = curses.color_pair(5) | curses.A_DIM
+        else:
+            attr = curses.A_DIM
+
+        stdscr.addstr(row, 0, " " * max(1, cols - 1))
+        stdscr.addstr(row, start_col, text[: max(1, cols - start_col - 1)], attr)
+        stdscr.refresh()
+    except curses.error:
+        pass
+
+
+def _build_reader_pad(stdscr, src_lines, image_info, width, rows, cols, x):
+    """Build a curses pad for the current chapter lines."""
+    totlines = len(src_lines)
+    pad = curses.newpad(totlines, width + 2)
+
+    if state.COLORSUPPORT:
+        pad.bkgd(stdscr.getbkgd())
+
+    pad.keypad(True)
+
+    for n, line in enumerate(src_lines):
+        try:
+            if line.startswith("IMG_LINE:") and n < len(image_info) and image_info[n]:
+                actual_line = line[9:]
+                for char_idx, char in enumerate(actual_line):
+                    if char_idx < len(image_info[n]):
+                        fg_color, bg_color = image_info[n][char_idx]
+                        if char != ' ' and state.COLORSUPPORT:
+                            color_pair = get_color_pair(fg_color, bg_color)
+                            if color_pair:
+                                pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
+                            else:
+                                pad.addstr(n, char_idx, char)
+                        else:
+                            pad.addstr(n, char_idx, char)
+                    else:
+                        pad.addstr(n, char_idx, char)
+            elif line.startswith("SYNTAX_HL:"):
+                content = line[10:]
+                current_bg_pair = curses.pair_number(pad.getbkgd())
+                is_light_theme = current_bg_pair == 3
+
+                if "|" in content:
+                    text_part, color_part = content.rsplit("|", 1)
+                    try:
+                        import ast
+                        colors = ast.literal_eval(color_part)
+                        line_lower = text_part.lower()
+                        _ = any(keyword in line_lower for keyword in ['import', 'export', 'from', 'const', 'let', 'var', 'function'])
+
+                        for char_idx, char in enumerate(text_part):
+                            if char_idx >= cols - x:
+                                break
+
+                            if char_idx < len(colors) and colors[char_idx]:
+                                color_data = colors[char_idx]
+                                if isinstance(color_data, (tuple, list)) and len(color_data) == 2:
+                                    dark_color, light_color = color_data
+                                    color_tuple = light_color if is_light_theme else dark_color
+                                elif isinstance(color_data, (tuple, list)) and len(color_data) == 3:
+                                    color_tuple = color_data
+                                else:
+                                    color_tuple = None
+
+                                if color_tuple and isinstance(color_tuple, (tuple, list)) and len(color_tuple) == 3:
+                                    syntax_bg_color = (240, 240, 240) if is_light_theme else (0, 0, 0)
+                                    color_pair = get_syntax_color_pair(color_tuple, syntax_bg_color)
+                                    if color_pair > 0:
+                                        try:
+                                            pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
+                                        except curses.error:
+                                            break
+                                    else:
+                                        try:
+                                            pad.addstr(n, char_idx, char, curses.A_BOLD)
+                                        except curses.error:
+                                            break
+                                else:
+                                    try:
+                                        pad.addstr(n, char_idx, char)
+                                    except curses.error:
+                                        break
+                            else:
+                                try:
+                                    pad.addstr(n, char_idx, char)
+                                except curses.error:
+                                    break
+
+                        text_end = min(len(text_part), cols - x)
+                        if text_end < cols - x:
+                            bg_color = (240, 240, 240) if is_light_theme else (0, 0, 0)
+                            bg_pair = get_syntax_color_pair((128, 128, 128), bg_color)
+                            if bg_pair > 0:
+                                for fill_col in range(text_end, cols - x):
+                                    try:
+                                        pad.addstr(n, fill_col, " ", curses.color_pair(bg_pair))
+                                    except curses.error:
+                                        break
+
+                        if state.CURRENT_SEARCH_TERM:
+                            import re
+                            search_pattern = re.escape(state.CURRENT_SEARCH_TERM)
+                            for match in re.finditer(search_pattern, text_part, re.IGNORECASE):
+                                start_pos = match.start()
+                                match_text = match.group()
+                                for char_idx, char in enumerate(match_text):
+                                    abs_char_pos = start_pos + char_idx
+                                    if abs_char_pos < len(text_part) and abs_char_pos < width:
+                                        try:
+                                            if state.COLORSUPPORT:
+                                                try:
+                                                    current_bg_pair = curses.pair_number(pad.getbkgd())
+                                                    is_light_scheme = current_bg_pair == 3
+                                                    search_color_pair = 10
+                                                    if is_light_scheme:
+                                                        curses.init_pair(search_color_pair, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                                                    else:
+                                                        curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_GREEN)
+                                                    pad.addstr(n, abs_char_pos, char, curses.color_pair(search_color_pair) | curses.A_BOLD)
+                                                except curses.error:
+                                                    pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
+                                            else:
+                                                pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
+                                        except curses.error:
+                                            break
+
+                        import re
+                        annotation_pattern = r'#(\d+)'
+                        for match in re.finditer(annotation_pattern, text_part):
+                            start_pos = match.start()
+                            annotation_text = match.group()
+                            if state.COLORSUPPORT:
+                                if is_light_theme:
+                                    annotation_color_pair = get_syntax_color_pair((180, 140, 0), (240, 240, 240))
+                                else:
+                                    annotation_color_pair = get_syntax_color_pair((255, 255, 0), (32, 32, 32))
+                                if annotation_color_pair > 0:
+                                    for i, char in enumerate(annotation_text):
+                                        char_pos = start_pos + i
+                                        if char_pos < cols - x:
+                                            try:
+                                                pad.addstr(n, char_pos, char, curses.color_pair(annotation_color_pair))
+                                            except curses.error:
+                                                pass
+                    except Exception as e:
+                        if state.DEBUG_MODE:
+                            print(f"Syntax-highlight color parsing failed: {e}", file=sys.stderr)
+                        apply_search_highlighting(pad, n, 0, text_part)
+                else:
+                    if content.strip():
+                        apply_search_highlighting(pad, n, 0, content)
+            elif line.startswith("URL_HL:"):
+                content = line[7:]
+                url_data = find_urls_in_text(content)
+                urls = [MockMatch(url, start, end) for url, start, end in url_data]
+                if urls:
+                    current_pos = 0
+                    for url_match in urls:
+                        if url_match.start() > current_pos:
+                            before_text = content[current_pos:url_match.start()]
+                            pad.addstr(n, current_pos, before_text)
+                        url_text = url_match.group()
+                        pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
+                        current_pos = url_match.end()
+                    if current_pos < len(content):
+                        remaining_text = content[current_pos:]
+                        pad.addstr(n, current_pos, remaining_text)
+                else:
+                    apply_search_highlighting(pad, n, 0, content)
+            elif line.startswith("TABLE_BG:"):
+                content = line[9:]
+                if state.COLORSUPPORT:
+                    table_bg_pair = get_color_pair((220, 220, 220), (48, 48, 48))
+                    if table_bg_pair > 0:
+                        for bg_col in range(cols - x):
+                            try:
+                                pad.addstr(n, bg_col, " ", curses.color_pair(table_bg_pair))
+                            except curses.error:
+                                pass
+
+                if content.strip():
+                    if content.startswith("URL_HL:"):
+                        url_content = content[7:]
+                        url_data = find_urls_in_text(url_content)
+                    else:
+                        url_content = content
+                        url_data = find_urls_in_text(content)
+                    urls = [MockMatch(url, start, end) for url, start, end in url_data]
+                    if urls:
+                        current_pos = 0
+                        text_content = url_content
+                        for url_match in urls:
+                            if url_match.start() > current_pos:
+                                before_text = text_content[current_pos:url_match.start()]
+                                pad.addstr(n, current_pos, before_text)
+                            url_text = url_match.group()
+                            try:
+                                pad.addstr(n, url_match.start(), url_text, curses.color_pair(0) | curses.A_UNDERLINE)
+                            except curses.error:
+                                pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
+                            current_pos = url_match.end()
+                        if current_pos < len(text_content):
+                            remaining_text = text_content[current_pos:]
+                            pad.addstr(n, current_pos, remaining_text)
+                    else:
+                        apply_search_highlighting(pad, n, 0, url_content)
+            elif line.startswith("HEADER:"):
+                content = line[7:]
+                if content.strip():
+                    text_start = len(content) - len(content.lstrip())
+                    text_end = len(content.rstrip())
+                    if text_start > 0:
+                        apply_search_highlighting(pad, n, 0, content[:text_start])
+                    header_text = content[text_start:text_end]
+                    if header_text:
+                        pad.addstr(n, text_start, header_text, curses.A_UNDERLINE | curses.A_BOLD)
+                    if text_end < len(content):
+                        apply_search_highlighting(pad, n, text_end, content[text_end:])
+            elif line.startswith("CAPTION:"):
+                content = line[8:]
+                if content.strip():
+                    centered_content = content.strip().center(cols)
+                    try:
+                        if hasattr(curses, 'A_ITALIC'):
+                            pad.addstr(n, 0, centered_content, curses.A_ITALIC)
+                        else:
+                            pad.addstr(n, 0, centered_content, curses.A_DIM)
+                    except curses.error:
+                        apply_search_highlighting(pad, n, 0, centered_content)
+            else:
+                display_line = line[9:] if line.startswith("IMG_LINE:") else line
+                apply_search_highlighting(pad, n, 0, str(display_line))
+        except curses.error:
+            pass
+
+    return pad
+
+
 def _make_loading_progress_callback(stdscr, initial_message="Loading chapter..."):
     """Return a callback that keeps the bottom-row spinner alive during work."""
     message, start_col, center_row, attr = show_loading_animation(stdscr, initial_message)
@@ -1134,6 +1434,7 @@ def _make_loading_progress_callback(stdscr, initial_message="Loading chapter..."
 def reader(stdscr, ebook, index, width, y, pctg):
     global WHOLE_BOOK_SEARCH_START, WHOLE_BOOK_SEARCH_VISITED
     k = 0 if SEARCHPATTERN is None else ord("/")
+    last_user_input_at = time.monotonic()
     rows, cols = stdscr.getmaxyx()
     x = (cols - width) // 2
 
@@ -1160,18 +1461,23 @@ def reader(stdscr, ebook, index, width, y, pctg):
     content = ebook.file.open(chpath).read()
     content = content.decode("utf-8")
 
-    loading_update = _make_loading_progress_callback(stdscr, "Loading chapter...")
+    cache_key = _image_cache_key(ebook.path, chpath, width)
+    existing_cached_images = IMAGE_RENDER_CACHE.get(cache_key, {}) if PIL_AVAILABLE else {}
+    show_startup_progress = not existing_cached_images
+    loading_update = _make_loading_progress_callback(stdscr, "Loading chapter...") if show_startup_progress else None
 
     parser = HTMLtoLines()
     try:
-        loading_update("Parsing chapter...")
+        if loading_update is not None:
+            loading_update("Parsing chapter...")
         parser.feed(content)
         parser.close()
     except Exception as e:
         if state.DEBUG_MODE:
             print(f"HTML parsing failed for {chpath}: {e}", file=sys.stderr)
 
-    loading_update("Formatting chapter...")
+    if loading_update is not None:
+        loading_update("Formatting chapter...")
     src_lines, imgs, img_alts = parser.get_lines(width)
     
     # Check if we're continuing a whole-book search
@@ -1237,13 +1543,13 @@ def reader(stdscr, ebook, index, width, y, pctg):
     image_info = []
     image_line_map = []
     if PIL_AVAILABLE:
-        loading_update("Preparing page...")
+        if loading_update is not None:
+            loading_update("Preparing page...")
         src_lines, image_info, image_line_map = prepare_image_placeholders(src_lines, imgs)
     else:
         # Create empty image tracking array if not rendering images
         image_line_map = [None] * len(src_lines)
 
-    cache_key = _image_cache_key(ebook.path, chpath, width)
     cached_images = IMAGE_RENDER_CACHE.get(cache_key, {}) if PIL_AVAILABLE else {}
     if cached_images:
         src_lines, image_info, image_line_map = _apply_cached_image_renders(
@@ -1259,355 +1565,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
     else:
         y = y % totlines
 
-    pad = curses.newpad(totlines, width + 2) # + 2 unnecessary
-
-    if state.COLORSUPPORT:
-        pad.bkgd(stdscr.getbkgd())
-
-    pad.keypad(True)
-    
-    # Render text with color support for images
-    for n, line in enumerate(src_lines):
-        try:
-            # Check if this is an image line with color information
-            if line.startswith("IMG_LINE:") and n < len(image_info) and image_info[n]:
-                actual_line = line[9:]  # Remove "IMG_LINE:" prefix
-                # Render character by character with foreground and background colors
-                for char_idx, char in enumerate(actual_line):
-                    if char_idx < len(image_info[n]):
-                        fg_color, bg_color = image_info[n][char_idx]
-                        if char != ' ' and state.COLORSUPPORT:
-                            # Get appropriate color pair for this foreground/background combination
-                            color_pair = get_color_pair(fg_color, bg_color)
-                            if color_pair:
-                                pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
-                            else:
-                                pad.addstr(n, char_idx, char)
-                        else:
-                            pad.addstr(n, char_idx, char)
-                    else:
-                        pad.addstr(n, char_idx, char)
-            elif line.startswith("SYNTAX_HL:"):
-                # Syntax highlighted line with color information
-                content = line[10:]  # Remove "SYNTAX_HL:" prefix
-                
-                # Determine current theme
-                current_bg_pair = curses.pair_number(pad.getbkgd())
-                is_light_theme = current_bg_pair == 3  # Light theme is color pair 3
-                
-                # Skip background filling for now - just use normal text rendering
-                if False:  # Disable complex background code
-                        # Fill from text start to right edge of terminal with appropriate background
-                        for bg_col in range(cols - x):
-                            try:
-                                pad.addstr(n, bg_col, " ", curses.color_pair(code_bg_pair))
-                            except curses.error:
-                                pass  # Ignore if we can't write at this position
-                
-                if "|" in content:
-                    text_part, color_part = content.rsplit("|", 1)
-                    try:
-                        # Parse the color list
-                        import ast
-                        colors = ast.literal_eval(color_part)
-                        # Make ALL syntax highlighted text BOLD for visibility testing
-                        # Check if this line contains keywords
-                        line_lower = text_part.lower()
-                        is_keyword_line = any(keyword in line_lower for keyword in ['import', 'export', 'from', 'const', 'let', 'var', 'function'])
-                        
-                        # Apply syntax highlighting with colors - CRITICAL: Stay within screen bounds
-                        for char_idx, char in enumerate(text_part):
-                            if char_idx >= cols - x:  # STOP if we would go beyond screen width
-                                break
-                                
-                            if char_idx < len(colors) and colors[char_idx]:
-                                # Get color tuple - could be dual format ((dark_rgb), (light_rgb)) or single (r,g,b)
-                                color_data = colors[char_idx]
-                                
-                                # Check if it's dual color format
-                                if isinstance(color_data, (tuple, list)) and len(color_data) == 2:
-                                    # Dual format: select based on theme
-                                    dark_color, light_color = color_data
-                                    color_tuple = light_color if is_light_theme else dark_color
-                                elif isinstance(color_data, (tuple, list)) and len(color_data) == 3:
-                                    # Single format (legacy): use as-is
-                                    color_tuple = color_data
-                                else:
-                                    color_tuple = None
-                                
-                                if color_tuple and isinstance(color_tuple, (tuple, list)) and len(color_tuple) == 3:
-                                    # Get or create color pair for this syntax color with appropriate background
-                                    # Use light gray background for light theme, pure black for dark modes
-                                    if is_light_theme:
-                                        syntax_bg_color = (240, 240, 240)  # Light gray background for light theme
-                                    else:
-                                        syntax_bg_color = (0, 0, 0)  # Pure black background for dark themes
-                                    
-                                    color_pair = get_syntax_color_pair(color_tuple, syntax_bg_color)
-                                    if color_pair > 0:
-                                        try:
-                                            pad.addstr(n, char_idx, char, curses.color_pair(color_pair))
-                                        except curses.error:
-                                            break  # Stop if we can't write anymore
-                                    else:
-                                        # Fallback to bold if color pair couldn't be created
-                                        try:
-                                            pad.addstr(n, char_idx, char, curses.A_BOLD)
-                                        except curses.error:
-                                            break  # Stop if we can't write anymore
-                                else:
-                                    # Invalid color format, use regular text
-                                    try:
-                                        pad.addstr(n, char_idx, char)
-                                    except curses.error:
-                                        break  # Stop if we can't write anymore
-                            else:
-                                # Regular text
-                                try:
-                                    pad.addstr(n, char_idx, char)
-                                except curses.error:
-                                    break  # Stop if we can't write anymore
-                        
-                        # Fill remaining line with background color for code blocks
-                        text_end = min(len(text_part), cols - x)
-                        if text_end < cols - x:
-                            # Determine background color based on theme
-                            if is_light_theme:
-                                bg_color = (240, 240, 240)  # Light gray
-                            else:
-                                bg_color = (0, 0, 0)        # Pure black
-                            
-                            # Get or create background color pair
-                            bg_pair = get_syntax_color_pair((128, 128, 128), bg_color)  # Gray text on background
-                            if bg_pair > 0:
-                                # Fill from end of text to right edge
-                                for fill_col in range(text_end, cols - x):
-                                    try:
-                                        pad.addstr(n, fill_col, " ", curses.color_pair(bg_pair))
-                                    except curses.error:
-                                        break  # Stop if we can't write anymore
-                        
-                        # Highlight search results with inverse video bright
-                        if state.CURRENT_SEARCH_TERM:
-                            import re
-                            search_pattern = re.escape(state.CURRENT_SEARCH_TERM)  # Escape special regex chars
-                            for match in re.finditer(search_pattern, text_part, re.IGNORECASE):
-                                start_pos = match.start()
-                                end_pos = match.end()
-                                match_text = match.group()
-                                
-                                # Apply custom search highlighting based on color scheme
-                                for char_idx, char in enumerate(match_text):
-                                    abs_char_pos = start_pos + char_idx
-                                    if abs_char_pos < len(text_part) and n + n_relative < rows and abs_char_pos < width:
-                                        try:
-                                            if state.COLORSUPPORT:
-                                                # Simple but effective approach: create custom search highlight color on demand
-                                                try:
-                                                    # Determine current color scheme
-                                                    current_bg_pair = curses.pair_number(pad.getbkgd())
-                                                    is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
-                                                    
-                                                    # Try to create a search highlight color pair
-                                                    search_color_pair = 10  # Use a low reserved pair for search  # Use high pair number to avoid conflicts
-                                                    
-                                                    if is_light_scheme:
-                                                        # Light mode: bright white text on black background
-                                                        curses.init_pair(search_color_pair, curses.COLOR_WHITE, curses.COLOR_BLACK)
-                                                    else:
-                                                        # Dark modes: black text on bright green background (closest to fluorescent yellow-green)
-                                                        curses.init_pair(search_color_pair, curses.COLOR_BLACK, curses.COLOR_GREEN)
-                                                    
-                                                    pad.addstr(n, abs_char_pos, char, curses.color_pair(search_color_pair) | curses.A_BOLD)
-                                                except curses.error:
-                                                    # If color pair creation fails, fall back to reverse video
-                                                    pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
-                                            else:
-                                                # Fallback to just inverse and bold
-                                                pad.addstr(n, abs_char_pos, char, curses.A_REVERSE | curses.A_BOLD)
-                                        except curses.error:
-                                            break  # Stop if we can't write anymore
-                        
-                        # Now look for annotation patterns (#1, #2, #3, etc.) and highlight them
-                        import re
-                        annotation_pattern = r'#(\d+)'
-                        for match in re.finditer(annotation_pattern, text_part):
-                            start_pos = match.start()
-                            end_pos = match.end()
-                            annotation_text = match.group()
-                            
-                            # Apply yellow text on appropriate background for the annotation
-                            if state.COLORSUPPORT:
-                                if is_light_theme:
-                                    # Dark yellow on light background for light theme
-                                    annotation_color_pair = get_syntax_color_pair((180, 140, 0), (240, 240, 240))
-                                else:
-                                    # Bright yellow on dark background for dark themes
-                                    annotation_color_pair = get_syntax_color_pair((255, 255, 0), (32, 32, 32))
-                                if annotation_color_pair > 0:
-                                    # Overwrite the annotation with yellow color - but ONLY if it's within bounds
-                                    for i, char in enumerate(annotation_text):
-                                        char_pos = start_pos + i
-                                        if char_pos < cols - x:  # CRITICAL: Only render if within screen bounds
-                                            try:
-                                                pad.addstr(n, char_pos, char, curses.color_pair(annotation_color_pair))
-                                            except curses.error:
-                                                pass  # Ignore if we can't write at this position
-                    except Exception as e:
-                        # If color parsing fails, just display as regular text
-                        if state.DEBUG_MODE:
-                            print(f"Syntax-highlight color parsing failed: {e}", file=sys.stderr)
-                        apply_search_highlighting(pad, n, 0, text_part)
-                else:
-                    # No color info, but still a syntax highlighted line - add background
-                    if state.COLORSUPPORT:
-                        # The dark background was already filled above
-                        pass
-                    # Display the text (which might be empty for blank lines)
-                    if content.strip():
-                        apply_search_highlighting(pad, n, 0, content)
-            elif line.startswith("URL_HL:"):
-                # URL highlighted line
-                import re
-                content = line[7:]  # Remove "URL_HL:" prefix
-                
-                # Find all URLs in the line using central function
-                url_data = find_urls_in_text(content)
-                urls = []
-                for url, start, end in url_data:
-                    urls.append(MockMatch(url, start, end))
-                if urls:
-                    current_pos = 0
-                    for url_match in urls:
-                        # Add text before URL
-                        if url_match.start() > current_pos:
-                            before_text = content[current_pos:url_match.start()]
-                            pad.addstr(n, current_pos, before_text)
-                        
-                        # Add URL with scheme-appropriate color (no underline for better readability)
-                        url_text = url_match.group()
-                        
-                        # Detect color scheme using pad background
-                        current_bg_pair = curses.pair_number(pad.getbkgd())
-                        is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
-                        
-                        # Just use attributes without custom colors to avoid black background
-                        # Use underline for all URLs regardless of theme
-                        pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
-                        
-                        current_pos = url_match.end()
-                    
-                    # Add any remaining text after the last URL
-                    if current_pos < len(content):
-                        remaining_text = content[current_pos:]
-                        pad.addstr(n, current_pos, remaining_text)
-                else:
-                    # No URLs found, display as regular text
-                    apply_search_highlighting(pad, n, 0, content)
-            elif line.startswith("TABLE_BG:"):
-                # Table background line - similar to syntax highlighting background
-                content = line[9:]  # Remove "TABLE_BG:" prefix
-                
-                # Fill background with slightly lighter gray than code blocks
-                if state.COLORSUPPORT:
-                    # Create table background color pair (lighter than code blocks)
-                    table_bg_pair = get_color_pair((220, 220, 220), (48, 48, 48))  # Light gray text on medium gray background
-                    if table_bg_pair > 0:
-                        # Fill from text start to right edge with table background
-                        for bg_col in range(cols - x):
-                            try:
-                                pad.addstr(n, bg_col, " ", curses.color_pair(table_bg_pair))
-                            except curses.error:
-                                pass  # Ignore if we can't write at this position
-                
-                # Add the actual text content
-                if content.strip():
-                    # Check if content is already a URL_HL line
-                    if content.startswith("URL_HL:"):
-                        # Handle nested URL_HL within table background
-                        url_content = content[7:]  # Remove "URL_HL:" prefix
-                        # Find URLs in the content using central function
-                        url_data = find_urls_in_text(url_content)
-                    else:
-                        # Check for URLs within regular table content and highlight them
-                        import re
-                        url_data = find_urls_in_text(content)
-                    urls = []
-                    for url, start, end in url_data:
-                        urls.append(MockMatch(url, start, end))
-                    if urls:
-                        # Handle URLs within table background
-                        current_pos = 0
-                        # Use the appropriate content for text positioning
-                        text_content = url_content if content.startswith("URL_HL:") else content
-                        for url_match in urls:
-                            # Add text before URL
-                            if url_match.start() > current_pos:
-                                before_text = text_content[current_pos:url_match.start()]
-                                pad.addstr(n, current_pos, before_text)
-                            
-                            # Add URL with same highlighting as regular URLs (just underline, no background)
-                            url_text = url_match.group()
-                            # Reset to normal colors and just add underline (no table background for URLs)
-                            try:
-                                # Clear the table background for this URL by using normal color pair
-                                pad.addstr(n, url_match.start(), url_text, curses.color_pair(0) | curses.A_UNDERLINE)
-                            except curses.error:
-                                # Fallback to just underline if color reset fails
-                                pad.addstr(n, url_match.start(), url_text, curses.A_UNDERLINE)
-                            
-                            current_pos = url_match.end()
-                        
-                        # Add remaining text
-                        if current_pos < len(text_content):
-                            remaining_text = text_content[current_pos:]
-                            pad.addstr(n, current_pos, remaining_text)
-                    else:
-                        # No URLs, just add the text (use appropriate content)
-                        display_content = url_content if content.startswith("URL_HL:") else content
-                        apply_search_highlighting(pad, n, 0, display_content)
-            elif line.startswith("HEADER:"):
-                # Header line - add underline formatting only to the actual text
-                content = line[7:]  # Remove "HEADER:" prefix
-                if content.strip():
-                    # Find the start and end of actual text (non-whitespace)
-                    text_start = len(content) - len(content.lstrip())
-                    text_end = len(content.rstrip())
-                    
-                    # Add leading whitespace without formatting
-                    if text_start > 0:
-                        apply_search_highlighting(pad, n, 0, content[:text_start])
-                    
-                    # Add the actual header text with underline + bold
-                    header_text = content[text_start:text_end]
-                    if header_text:
-                        pad.addstr(n, text_start, header_text, curses.A_UNDERLINE | curses.A_BOLD)
-                    
-                    # Add trailing whitespace without formatting (if any)
-                    if text_end < len(content):
-                        apply_search_highlighting(pad, n, text_end, content[text_end:])
-            elif line.startswith("CAPTION:"):
-                # Caption line - format with italic style and centered
-                content = line[8:]  # Remove "CAPTION:" prefix
-                if content.strip():
-                    # Center the caption text
-                    centered_content = content.strip().center(cols)
-                    try:
-                        # Add italic formatting if supported, otherwise just dim
-                        if hasattr(curses, 'A_ITALIC'):
-                            pad.addstr(n, 0, centered_content, curses.A_ITALIC)
-                        else:
-                            pad.addstr(n, 0, centered_content, curses.A_DIM)
-                    except curses.error:
-                        # Fallback to normal text if formatting fails
-                        apply_search_highlighting(pad, n, 0, centered_content)
-            else:
-                # Regular text line
-                display_line = line[9:] if line.startswith("IMG_LINE:") else line
-                apply_search_highlighting(pad, n, 0, str(display_line))
-        except curses.error:
-            pass
-    # Remove end markers - just display clean text
+    pad = _build_reader_pad(stdscr, src_lines, image_info, width, rows, cols, x)
 
     stdscr.clear()
     stdscr.refresh()
@@ -2188,25 +2146,48 @@ def reader(stdscr, ebook, index, width, y, pctg):
                 show_initial_help_message(stdscr, rows, cols)
                 stdscr.refresh()
         
-        # Keep idle ticks short while there are still placeholders to realize.
+        # Defer image realization until the reader has been idle for a while.
         loaded_images = set(cached_images.keys()) if PIL_AVAILABLE else set()
-        has_pending_images = (
-            PIL_AVAILABLE
-            and _choose_next_pending_image(src_lines, image_line_map, loaded_images, y, rows) is not None
+        now = time.monotonic()
+        idle_for = now - last_user_input_at
+        idle_ready = idle_for >= PROGRESSIVE_IMAGE_IDLE_DELAY
+        lookbehind_lines = rows * PROGRESSIVE_IMAGE_LOOKBEHIND_SCREENS
+        lookahead_lines = rows * PROGRESSIVE_IMAGE_LOOKAHEAD_SCREENS
+        pending_batch = (
+            _choose_pending_images_batch(
+                src_lines,
+                image_line_map,
+                loaded_images,
+                y,
+                rows,
+                PROGRESSIVE_IMAGE_BATCH_SIZE,
+                lookbehind_lines=lookbehind_lines,
+                lookahead_lines=lookahead_lines,
+            )
+            if PIL_AVAILABLE and idle_ready else []
         )
-        pad.timeout(250 if has_pending_images else 1000)
+        has_pending_images = bool(pending_batch)
+        if PIL_AVAILABLE and not idle_ready:
+            timeout_ms = max(
+                50,
+                int((PROGRESSIVE_IMAGE_IDLE_DELAY - idle_for) * 1000),
+            )
+        elif has_pending_images:
+            timeout_ms = PROGRESSIVE_IMAGE_POLL_MS
+        else:
+            timeout_ms = 1000
+        pad.timeout(timeout_ms)
         k = pad.getch()
         pad.timeout(-1)  # Reset to blocking
         
         # Handle timeout (no key pressed)
         if k == -1:  # Timeout occurred
             if has_pending_images:
-                next_image = _choose_next_pending_image(
-                    src_lines, image_line_map, loaded_images, y, rows
-                )
-                if next_image is not None:
-                    line_idx, img_idx = next_image
-                    loading_update(f"Rendering images {len(loaded_images) + 1}/{len(imgs)}...")
+                show_deferred_image_hint(stdscr)
+                cache_entry = IMAGE_RENDER_CACHE.setdefault(cache_key, {})
+                new_y = y
+                newly_rendered = {}
+                for batch_index, (line_idx, img_idx) in enumerate(pending_batch, start=1):
                     try:
                         rendered_chunk = render_single_image_inline(
                             ebook, chpath, imgs[img_idx], img_idx, width
@@ -2221,12 +2202,23 @@ def reader(stdscr, ebook, index, width, y, pctg):
                             [img_idx],
                         )
 
-                    IMAGE_RENDER_CACHE.setdefault(cache_key, {})[img_idx] = rendered_chunk
+                    cache_entry[img_idx] = rendered_chunk
+                    newly_rendered[img_idx] = rendered_chunk
                     delta = max(0, len(rendered_chunk[0]) - 1)
-                    new_y = y + delta if line_idx < y else y
-                    return 0, width, new_y, None
+                    if line_idx < new_y:
+                        new_y += delta
+
+                src_lines, image_info, image_line_map = _apply_cached_image_renders(
+                    src_lines, image_info, image_line_map, newly_rendered
+                )
+                cached_images = cache_entry
+                totlines = len(src_lines)
+                y = min(max(0, new_y), max(0, totlines - 1))
+                pad = _build_reader_pad(stdscr, src_lines, image_info, width, rows, cols, x)
             continue  # Go back to check timer and redraw
-        
+
+        last_user_input_at = time.monotonic()
+
         # Clear initial help message on any actual key press
         if show_initial_help:
             show_initial_help = False

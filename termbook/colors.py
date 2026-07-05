@@ -11,6 +11,7 @@ from termbook import state
 
 # Smart color palette system
 _color_palette = []  # Pre-computed palette of color indices
+_terminal_palette = []  # Indexed xterm-256 RGB palette
 _color_pairs = {}    # Cache of created color pairs  
 _image_cache = {}    # Cache processed images to avoid re-rendering on resize
 _next_color_pair = 6  # Start after pre-defined reserved pairs (1-5)
@@ -102,6 +103,53 @@ def init_smart_color_palette():
     
     _color_palette = palette
 
+
+def _build_terminal_palette():
+    """Build the RGB lookup table for the terminal's 256-color palette."""
+    global _terminal_palette
+    if _terminal_palette:
+        return
+
+    basic_colors = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ]
+    palette = list(basic_colors)
+
+    cube_levels = [0, 95, 135, 175, 215, 255]
+    for r in cube_levels:
+        for g in cube_levels:
+            for b in cube_levels:
+                palette.append((r, g, b))
+
+    for level in range(24):
+        gray = 8 + level * 10
+        palette.append((gray, gray, gray))
+
+    _terminal_palette = palette
+
+
+def _rgb_distance(a, b):
+    return (
+        (a[0] - b[0]) * (a[0] - b[0])
+        + (a[1] - b[1]) * (a[1] - b[1])
+        + (a[2] - b[2]) * (a[2] - b[2])
+    )
+
 def find_closest_palette_color(target_rgb):
     """Find the closest color in our palette using more discerning matching."""
     if not _color_palette:
@@ -137,41 +185,19 @@ def rgb_to_color_index(r, g, b):
     """Convert RGB to 256-color palette index."""
     try:
         r, g, b = max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
-        
-        # Much stricter grayscale detection - only perfectly gray colors
-        # Increased threshold to 35 to preserve subtle colors
-        max_diff = max(abs(r - g), abs(g - b), abs(r - b))
-        
-        # Only consider it grayscale if VERY close in values AND low saturation
-        # This preserves more colored pixels and prevents "hickeldy pickley" colors
-        if max_diff < 35:
-            # Check saturation - if there's any color bias, preserve it
-            avg = (r + g + b) / 3
-            color_bias = max(abs(r - avg), abs(g - avg), abs(b - avg))
-            
-            if color_bias < 18:  # Only truly neutral colors become grayscale
-                gray = int((r + g + b) / 3)
-                if gray < 8:
-                    return 0  # Black
-                elif gray > 248:  
-                    return 15  # White
-                else:
-                    # Map to grayscale 232-255 (24 levels)
-                    level = min(23, max(0, (gray - 8) * 23 // 240))
-                    return 232 + level
-        
-        # For colored pixels, use better quantization to match our 8x8x8 palette
-        # This provides smoother color gradations
-        r_level = min(7, int(r * 8 / 256))
-        g_level = min(7, int(g * 8 / 256))
-        b_level = min(7, int(b * 8 / 256))
-        # Map to appropriate color index in 256-color space
-        # We still need to map to the standard 6x6x6 cube for terminal compatibility
-        # So convert our 8-level to nearest 6-level
-        r_level_6 = min(5, int(r_level * 6 / 8))
-        g_level_6 = min(5, int(g_level * 6 / 8))
-        b_level_6 = min(5, int(b_level * 6 / 8))
-        return 16 + r_level_6 * 36 + g_level_6 * 6 + b_level_6
+        _build_terminal_palette()
+
+        target = (r, g, b)
+        best_index = 0
+        best_distance = float("inf")
+
+        for idx, palette_rgb in enumerate(_terminal_palette):
+            distance = _rgb_distance(target, palette_rgb)
+            if distance < best_distance:
+                best_distance = distance
+                best_index = idx
+
+        return best_index
     except (TypeError, ValueError):
         return 7  # Default white
 
@@ -181,13 +207,7 @@ def get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True):
     
     if not state.COLORSUPPORT:
         return 0, False  # No color support, no reversal
-    
-    # Simplify colors using palette matching
-    if fg_color:
-        fg_color = find_closest_palette_color(fg_color)
-    if bg_color:
-        bg_color = find_closest_palette_color(bg_color)
-    
+
     # Convert to color indices
     fg_idx = rgb_to_color_index(*fg_color) if fg_color else -1
     bg_idx = rgb_to_color_index(*bg_color) if bg_color else -1
