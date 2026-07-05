@@ -508,7 +508,7 @@ def detect_image_colorfulness(img, sample_size=100):
     return is_monochrome, avg_saturation
 
 
-def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
+def render_images_inline(ebook, chpath, src_lines, imgs, max_width, progress_callback=None):
     """Convert image placeholders to block-based representation inline with color info."""
     if not PIL_AVAILABLE or not imgs:
         # Create empty image tracking array for each line
@@ -518,6 +518,8 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
     new_lines = []
     image_info = []
     image_line_map = []  # Track which image (if any) is associated with each line
+    processed_images = 0
+    total_images = len(imgs)
     
     for line in src_lines:
         # Check if line contains an image placeholder
@@ -526,6 +528,10 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
             img_idx = int(img_match.group(1))
             if img_idx < len(imgs):
                 try:
+                    processed_images += 1
+                    if progress_callback is not None:
+                        progress_callback(processed_images, total_images)
+
                     # Get image path
                     impath = imgs[img_idx]
                     imgsrc = dots_path(chpath, impath)

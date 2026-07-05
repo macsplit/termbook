@@ -1043,11 +1043,32 @@ def update_loading_animation(stdscr, message, start_col, center_row, attr, step)
         spinner_frames = ("|", "/", "-", "\\")
         frame = spinner_frames[step % len(spinner_frames)]
         status_text = f" {frame} {message} "
+        start_col = max(0, (cols - len(status_text)) // 2)
         stdscr.addstr(center_row, 0, " " * max(1, cols - 1), attr)
         stdscr.addstr(center_row, max(0, start_col), status_text, attr)
         stdscr.refresh()
     except curses.error:
         pass  # Ignore any display errors
+
+
+def _make_loading_progress_callback(stdscr, initial_message="Loading chapter..."):
+    """Return a callback that keeps the bottom-row spinner alive during work."""
+    message, start_col, center_row, attr = show_loading_animation(stdscr, initial_message)
+    progress = {"step": 0}
+    update_loading_animation(stdscr, message, start_col, center_row, attr, progress["step"])
+
+    def _update(message_text):
+        progress["step"] += 1
+        update_loading_animation(
+            stdscr,
+            message_text,
+            start_col,
+            center_row,
+            attr,
+            progress["step"],
+        )
+
+    return _update
 
 
 def reader(stdscr, ebook, index, width, y, pctg):
@@ -1079,14 +1100,18 @@ def reader(stdscr, ebook, index, width, y, pctg):
     content = ebook.file.open(chpath).read()
     content = content.decode("utf-8")
 
+    loading_update = _make_loading_progress_callback(stdscr, "Loading chapter...")
+
     parser = HTMLtoLines()
     try:
+        loading_update("Parsing chapter...")
         parser.feed(content)
         parser.close()
     except Exception as e:
         if state.DEBUG_MODE:
             print(f"HTML parsing failed for {chpath}: {e}", file=sys.stderr)
 
+    loading_update("Formatting chapter...")
     src_lines, imgs, img_alts = parser.get_lines(width)
     
     # Check if we're continuing a whole-book search
@@ -1152,7 +1177,17 @@ def reader(stdscr, ebook, index, width, y, pctg):
     image_info = []
     image_line_map = []
     if PIL_AVAILABLE:
-        src_lines, image_info, image_line_map = render_images_inline(ebook, chpath, src_lines, imgs, width)
+        def _image_progress(current, total):
+            loading_update(f"Rendering images {current}/{total}...")
+
+        src_lines, image_info, image_line_map = render_images_inline(
+            ebook,
+            chpath,
+            src_lines,
+            imgs,
+            width,
+            progress_callback=_image_progress if imgs else None,
+        )
     else:
         # Create empty image tracking array if not rendering images
         image_line_map = [None] * len(src_lines)

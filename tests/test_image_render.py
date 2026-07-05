@@ -1,5 +1,7 @@
 """Tests for bounded-palette inline image rendering."""
 
+from io import BytesIO
+
 from PIL import Image
 
 from termbook import image_render
@@ -81,3 +83,39 @@ def test_is_decorative_image_keeps_large_meaningful_diagram():
                 img.putpixel((x, y), (20, 90, 180))
 
     assert image_render._is_decorative_image(img, "model-diagram.png") is False
+
+
+def test_render_images_inline_reports_progress(monkeypatch):
+    img = Image.new("RGB", (8, 8), (50, 100, 150))
+    payload = BytesIO()
+    img.save(payload, format="PNG")
+
+    class FakeFile:
+        def read(self, _path):
+            return payload.getvalue()
+
+    class FakeBook:
+        file = FakeFile()
+
+    progress_calls = []
+
+    monkeypatch.setattr(image_render, "dots_path", lambda _chpath, impath: impath)
+    monkeypatch.setattr(image_render, "_is_decorative_image", lambda _img, _path="": False)
+    monkeypatch.setattr(
+        image_render,
+        "render_image_with_quadrant_blocks",
+        lambda _img, _width, _height: [("XX", [((0, 0, 0), (0, 0, 0)), ((0, 0, 0), (0, 0, 0))])],
+    )
+
+    lines, _, line_map = image_render.render_images_inline(
+        FakeBook(),
+        "chapter.xhtml",
+        ["[IMG:0]", "after"],
+        ["image.png"],
+        40,
+        progress_callback=lambda current, total: progress_calls.append((current, total)),
+    )
+
+    assert progress_calls == [(1, 1)]
+    assert lines[0].startswith("IMG_LINE:")
+    assert line_map[0] == 0
