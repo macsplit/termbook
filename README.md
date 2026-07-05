@@ -1,6 +1,6 @@
 # termbook
 
-A terminal-based EPUB reader optimized for programming books, with inline 256-color image rendering and syntax-highlighted code blocks.
+A terminal-based EPUB reader optimized for programming books, with image previews and syntax-highlighted code blocks.
 
 ![termbook screenshot](screenshot.png)
 
@@ -10,7 +10,7 @@ termbook is a derivative of [epr (epub-reader)](https://github.com/wustho/epr) b
 
 ### Key Features
 
-- **256-color inline image rendering** - View diagrams, charts, and illustrations directly in your terminal
+- **Image previews** - See a rough in-terminal impression of embedded images, with external viewing available where supported
 - **Syntax-highlighted code blocks** - Automatic language detection and highlighting for code snippets
 - **Full EPUB support** - Read any standard EPUB file
 - **Curses-based interface** - Clean, distraction-free reading experience
@@ -28,7 +28,7 @@ This project is based on **epr (epub-reader)** by Benawi Adha:
 - License: MIT
 - Author: Benawi Adha (benawiadha@gmail.com)
 
-The core EPUB reading functionality, curses interface, and navigation system are from the original epr project. Enhancements for image rendering and code highlighting were added by Lee Hanken.
+The core EPUB reading functionality, curses interface, and navigation system are from the original epr project. Enhancements for image previews and code highlighting were added by Lee Hanken.
 
 ## Requirements
 

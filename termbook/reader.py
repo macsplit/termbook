@@ -35,7 +35,7 @@ from termbook.text_render import HTMLtoLines, find_urls_in_text, MockMatch
 from termbook.colors import (
     get_color_pair, get_color_pair_with_reversal, get_syntax_color_pair,
     rgb_to_color_index, find_closest_palette_color, init_smart_color_palette,
-    init_syntax_color_pairs,
+    init_syntax_color_pairs, reset_dynamic_color_pairs,
 )
 from termbook.image_render import (
     render_images_inline, render_image_with_fabulous, render_image_with_quarter_blocks,
@@ -684,7 +684,7 @@ def open_media(scr, epub, src):
             color_lines = render_image_with_fabulous(img, max_width, max_height)
             if not color_lines:  # Fallback if Fabulous fails
                 color_lines = render_image_with_quarter_blocks(img, max_width, max_height)
-            
+
             # Temporarily exit curses mode to display with full color
             curses.endwin()
             
@@ -916,98 +916,43 @@ def searching(stdscr, pad, src, width, y, ch, tot):
 
 
 def show_loading_animation(stdscr, message="Loading..."):
-    """Display a centered loading animation with rolling spectrum effect."""
+    """Prepare a bottom-row loading indicator that does not consume pair slots."""
     rows, cols = stdscr.getmaxyx()
     
-    # Center position
-    center_row = rows // 2
+    # Use the bottom status row so we do not disturb the current page body.
+    center_row = max(0, rows - 1)
     center_col = cols // 2
     
     # Determine current color scheme
     current_bg_pair = curses.pair_number(stdscr.getbkgd())
     is_light_scheme = current_bg_pair == 3  # Light scheme is color pair 3
     
-    # Don't clear screen - preserve current background
-    # Just clear the message area to avoid artifacts
-    msg_len = len(message)
+    msg_len = len(message) + 6
     start_col = center_col - msg_len // 2
-    
-    # Clear only the exact message area, no extra padding to avoid overwriting text
+
+    # Blank the whole status row so the indicator never overlays page content.
     try:
-        # Only clear the space where the loading message will appear - exact length only
-        if start_col >= 0 and start_col + msg_len <= cols:
-            stdscr.addstr(center_row, start_col, " " * msg_len)
+        stdscr.addstr(center_row, 0, " " * max(1, cols - 1))
     except curses.error:
         pass
-    
-    # Create saturated two-color gradient with doubled sequence
-    gradient_steps = 16  # Steps for one direction
-    
-    if is_light_scheme:
-        # Darker colors for light theme - better visibility
-        start_color = (0, 50, 150)     # Dark blue
-        end_color = (0, 120, 100)      # Dark teal
+
+    if state.COLORSUPPORT:
+        attr = curses.color_pair(5) | curses.A_BOLD if is_light_scheme else curses.color_pair(4) | curses.A_BOLD
     else:
-        # Bright colors for dark theme
-        start_color = (100, 150, 255)  # Bright blue (saturated)
-        end_color = (100, 255, 200)    # Bright cyan-green (saturated)
-    
-    # Generate doubled sequence: dark→light→dark→light
-    spectrum_colors = []
-    
-    # First half: start_color → end_color
-    for i in range(gradient_steps):
-        t = i / (gradient_steps - 1)  # 0.0 to 1.0
-        r = int(start_color[0] + t * (end_color[0] - start_color[0]))
-        g = int(start_color[1] + t * (end_color[1] - start_color[1]))
-        b = int(start_color[2] + t * (end_color[2] - start_color[2]))
-        spectrum_colors.append((r, g, b))
-    
-    # Second half: end_color → start_color (back to beginning)
-    for i in range(gradient_steps):
-        t = i / (gradient_steps - 1)  # 0.0 to 1.0
-        r = int(end_color[0] + t * (start_color[0] - end_color[0]))
-        g = int(end_color[1] + t * (start_color[1] - end_color[1]))
-        b = int(end_color[2] + t * (start_color[2] - end_color[2]))
-        spectrum_colors.append((r, g, b))
-    
-    return message, start_col, center_row, spectrum_colors
+        attr = curses.A_REVERSE | curses.A_BOLD
+
+    return message, start_col, center_row, attr
 
 
-def update_loading_animation(stdscr, message, start_col, center_row, spectrum_colors, step):
-    """Update the rolling spectrum animation."""
+def update_loading_animation(stdscr, message, start_col, center_row, attr, step):
+    """Update a bottom-row loading indicator without allocating color pairs."""
     try:
-        # Create rolling wave effect across the message
-        for i, char in enumerate(message):
-            # Calculate color index with rolling wave
-            color_idx = (step + i) % len(spectrum_colors)
-            r, g, b = spectrum_colors[color_idx]
-            
-            # Create rolling spectrum animation with actual RGB colors
-            if state.COLORSUPPORT:
-                try:
-                    # Get RGB color from spectrum
-                    r, g, b = spectrum_colors[color_idx]
-                    
-                    # Convert RGB to terminal color index
-                    color_idx_terminal = rgb_to_color_index(r, g, b)
-                    
-                    # Try to get or create color pair 
-                    pair_id, _ = get_color_pair_with_reversal((r, g, b), (0, 0, 0), allow_reversal=False)
-                    
-                    if pair_id > 0:
-                        # Use the spectrum color pair
-                        stdscr.addstr(center_row, start_col + i, char, curses.color_pair(pair_id) | curses.A_BOLD)
-                    else:
-                        # Fallback: use terminal color directly if pair creation failed
-                        stdscr.addstr(center_row, start_col + i, char, curses.color_pair(color_idx_terminal) | curses.A_BOLD)
-                except curses.error:
-                    # Final fallback to bold
-                    stdscr.addstr(center_row, start_col + i, char, curses.A_BOLD)
-            else:
-                # No color support, just use bold
-                stdscr.addstr(center_row, start_col + i, char, curses.A_BOLD)
-        
+        cols = stdscr.getmaxyx()[1]
+        spinner_frames = ("|", "/", "-", "\\")
+        frame = spinner_frames[step % len(spinner_frames)]
+        status_text = f" {frame} {message} "
+        stdscr.addstr(center_row, 0, " " * max(1, cols - 1), attr)
+        stdscr.addstr(center_row, max(0, start_col), status_text, attr)
         stdscr.refresh()
     except curses.error:
         pass  # Ignore any display errors
@@ -1018,6 +963,11 @@ def reader(stdscr, ebook, index, width, y, pctg):
     k = 0 if SEARCHPATTERN is None else ord("/")
     rows, cols = stdscr.getmaxyx()
     x = (cols - width) // 2
+
+    # This render pass redraws the whole pad from scratch, so it is a safe
+    # point to recycle dynamic curses color pairs rather than letting previous
+    # image-heavy chapters permanently crowd out later UI effects.
+    reset_dynamic_color_pairs()
 
     contents = ebook.contents
     toc_src = ebook.toc_entries
@@ -2116,6 +2066,8 @@ def preread(stdscr, file):
         curses.init_pair(1, -1, -1)
         curses.init_pair(2, DARK[0], DARK[1])
         curses.init_pair(3, LIGHT[0], LIGHT[1])
+        curses.init_pair(4, curses.COLOR_CYAN, -1)
+        curses.init_pair(5, curses.COLOR_BLUE, -1)
         # Set initial color scheme to 1 (default)
         stdscr.bkgd(curses.color_pair(1))
         state.COLORSUPPORT = True
@@ -2264,6 +2216,11 @@ def preread(stdscr, file):
             global LOADING_IN_PROGRESS
             
             LOADING_IN_PROGRESS = True
+
+            # The loading animation is drawn on a fresh screen and can reuse the
+            # dynamic pair pool independently of the previous chapter's image
+            # colors.
+            reset_dynamic_color_pairs()
             
             # Start loading animation with spectrum effect
             animation_data = show_loading_animation(stdscr, "Loading chapter...")

@@ -5,6 +5,7 @@ which need to turn an RGB color into a curses color pair.
 """
 
 import curses
+import os
 
 from termbook import state
 
@@ -12,11 +13,34 @@ from termbook import state
 _color_palette = []  # Pre-computed palette of color indices
 _color_pairs = {}    # Cache of created color pairs  
 _image_cache = {}    # Cache processed images to avoid re-rendering on resize
-_next_color_pair = 4  # Start after pre-defined pairs (1,2,3)  
+_next_color_pair = 6  # Start after pre-defined reserved pairs (1-5)
 _MAX_COLOR_PAIRS = 32000   # Safe limit - most terminals support 32768 or 65536
 _SEARCH_PAIR_START = 32001  # Reserved pairs for search highlighting  
 # Syntax highlighting pairs are now allocated dynamically
 # All pairs are now allocated dynamically from the same pool
+
+
+def reset_dynamic_color_pairs():
+    """Reset the dynamic pair cache at safe full-redraw boundaries."""
+    global _color_pairs, _next_color_pair
+    _color_pairs = {}
+    _next_color_pair = 6
+
+
+def get_available_color_pair_budget():
+    """Return the practical pair budget for dynamic color-pair allocation."""
+    override = os.getenv("TERMBOOK_MAX_COLOR_PAIRS")
+    if override:
+        try:
+            return max(16, int(override))
+        except ValueError:
+            pass
+
+    terminal_pairs = getattr(curses, "COLOR_PAIRS", 0) or 0
+    if terminal_pairs > 16:
+        return max(16, terminal_pairs - 256)
+
+    return _MAX_COLOR_PAIRS
 
 def get_ui_color_pair(purpose="loading"):
     """Get a dedicated color pair for UI elements like loading messages."""
@@ -183,7 +207,7 @@ def get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=True):
         return _color_pairs[reversed_key], True  # Use reversed pair
     
     # Create new pair if we have room
-    if _next_color_pair < _MAX_COLOR_PAIRS:
+    if _next_color_pair < get_available_color_pair_budget():
         try:
             curses.init_pair(_next_color_pair, fg_idx, bg_idx)
             _color_pairs[key] = _next_color_pair
@@ -220,4 +244,3 @@ def get_color_pair(fg_color, bg_color=None):
     
     color_pair, _ = get_color_pair_with_reversal(fg_color, bg_color, allow_reversal=False)
     return color_pair
-

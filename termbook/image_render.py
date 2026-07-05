@@ -26,7 +26,157 @@ except ImportError:
     FABULOUS_AVAILABLE = False
 
 from termbook import state
+from termbook.colors import get_available_color_pair_budget
 from termbook.epub import dots_path
+
+
+INLINE_IMAGE_PALETTE_SIZE = 64
+_QUADRANT_CHARS = {
+    0: " ",
+    1: "▘",
+    2: "▝",
+    3: "▀",
+    4: "▖",
+    5: "▌",
+    6: "▞",
+    7: "▛",
+    8: "▗",
+    9: "▚",
+    10: "▐",
+    11: "▜",
+    12: "▄",
+    13: "▙",
+    14: "▟",
+    15: "█",
+}
+
+
+def quantize_image_for_inline(img, palette_size=INLINE_IMAGE_PALETTE_SIZE):
+    """Reduce an image to a bounded palette so curses pair allocation stays sane."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    palette_size = max(2, min(palette_size, 256))
+    quantized = img.quantize(colors=palette_size, method=Image.Quantize.MEDIANCUT)
+    return quantized.convert("RGB")
+
+
+def get_inline_palette_size():
+    """Choose an inline palette size from the available pair budget."""
+    override = os.getenv("TERMBOOK_INLINE_PALETTE")
+    if override:
+        try:
+            return max(8, min(128, int(override)))
+        except ValueError:
+            pass
+
+    pair_budget = get_available_color_pair_budget()
+    if pair_budget >= 12000:
+        return 96
+    if pair_budget >= 6000:
+        return 64
+    if pair_budget >= 2500:
+        return 48
+    return 32
+
+
+def _color_distance(a, b):
+    r_diff = a[0] - b[0]
+    g_diff = a[1] - b[1]
+    b_diff = a[2] - b[2]
+    return r_diff * r_diff + g_diff * g_diff + b_diff * b_diff
+
+
+def _choose_two_block_colors(samples):
+    """Choose up to two representative colors for a 2x2 character cell."""
+    unique = []
+    for color in samples:
+        if color not in unique:
+            unique.append(color)
+        if len(unique) == 4:
+            break
+
+    if len(unique) <= 2:
+        if len(unique) == 1:
+            return unique[0], unique[0]
+        return unique[0], unique[1]
+
+    best_pair = (unique[0], unique[1])
+    best_score = float("inf")
+
+    for i, fg_color in enumerate(unique):
+        for bg_color in unique[i + 1:]:
+            score = 0
+            for sample in samples:
+                score += min(_color_distance(sample, fg_color), _color_distance(sample, bg_color))
+            if score < best_score:
+                best_score = score
+                best_pair = (fg_color, bg_color)
+
+    return best_pair
+
+
+def render_image_with_quadrant_blocks(img, max_width, max_height):
+    """Render an image using 2x2 Unicode quadrant glyphs with bounded colors."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    orig_width, orig_height = img.size
+    if orig_width <= 0 or orig_height <= 0:
+        return []
+
+    aspect_ratio = orig_width / orig_height
+    terminal_char_aspect = 2.0
+    display_area_aspect = max_width / max_height * terminal_char_aspect
+
+    if aspect_ratio > display_area_aspect:
+        target_width_chars = max_width
+        target_height_chars = int(target_width_chars / aspect_ratio / terminal_char_aspect)
+    else:
+        target_height_chars = max_height
+        target_width_chars = int(target_height_chars * aspect_ratio * terminal_char_aspect)
+
+    target_width_chars = max(1, min(max_width, target_width_chars))
+    target_height_chars = max(1, min(max_height, target_height_chars))
+
+    target_pixel_width = max(2, target_width_chars * 2)
+    target_pixel_height = max(2, target_height_chars * 2)
+    if target_pixel_width % 2:
+        target_pixel_width += 1
+    if target_pixel_height % 2:
+        target_pixel_height += 1
+
+    resized = img.resize((target_pixel_width, target_pixel_height), Image.Resampling.LANCZOS)
+    quantized = quantize_image_for_inline(resized, palette_size=get_inline_palette_size())
+    width, height = quantized.size
+    pixels = quantized.load()
+
+    rendered_lines = []
+
+    for y in range(0, height, 2):
+        line_chars = []
+        line_colors = []
+
+        for x in range(0, width, 2):
+            tl = pixels[x, y]
+            tr = pixels[min(x + 1, width - 1), y]
+            bl = pixels[x, min(y + 1, height - 1)]
+            br = pixels[min(x + 1, width - 1), min(y + 1, height - 1)]
+            samples = [tl, tr, bl, br]
+
+            fg_color, bg_color = _choose_two_block_colors(samples)
+            mask = 0
+            for bit, sample in enumerate(samples):
+                if _color_distance(sample, fg_color) <= _color_distance(sample, bg_color):
+                    mask |= 1 << bit
+
+            char = _QUADRANT_CHARS[mask]
+            line_chars.append(char)
+            line_colors.append((fg_color, bg_color))
+
+        rendered_lines.append(("".join(line_chars), line_colors))
+
+    return rendered_lines
 
 
 def render_image_with_fabulous(img_data, max_width, max_height):
@@ -404,8 +554,10 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     # Calculate available screen space
                     max_chars_available = max_width - 8
                     
-                    # Account for terminal character aspect ratio (chars are 2:1 height:width)
-                    # Each output character represents 2 pixels vertically with half-block technique
+                    # Terminal cells are still physically taller than they are
+                    # wide. The 2x2 quadrant renderer increases detail inside
+                    # the cell, but it does not change the cell's on-screen
+                    # aspect ratio.
                     terminal_char_aspect = 2.0
                     
                     # Width-based scaling approach: expand small images to 75% of available width
@@ -413,7 +565,9 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                     max_height_available = 30  # Conservative max height
                     
                     # Calculate what percentage of screen width this image would naturally take
-                    natural_char_width = min(orig_width // 2, max_width_by_screen)  # Rough conversion
+                    # Quadrant blocks improve horizontal detail inside each cell,
+                    # but they do not justify halving the number of screen cells.
+                    natural_char_width = min(orig_width, max_width_by_screen)  # Rough conversion
                     width_percentage = natural_char_width / max_width_by_screen
                     
                     if width_percentage < 0.50:  # Image is less than 50% of available width
@@ -456,97 +610,18 @@ def render_images_inline(ebook, chpath, src_lines, imgs, max_width):
                         char_width = max(min_width, min(char_width, max_width_by_screen))
                         char_height = max(min_height, min(char_height, max_height_available))
                     
-                    # Determine scale factor for rendering quality
-                    scale_factor = 2 if char_width >= 40 else 1
-                    
-                    # Set up rendering parameters to match the calculated dimensions exactly
-                    # Each character represents 1 pixel horizontally and 2 pixels vertically (half-block technique)
-                    target_pixel_width = char_width      # 1 pixel per character horizontally
-                    target_pixel_height = char_height * 2 # 2 pixels per character vertically (half-block)
-                    
-                    # Processing parameters: process the entire width at once, 1 character per pixel
-                    pixels_per_block = char_width  # Process entire width 
-                    chars_per_block = char_width   # Output entire width
-                    
-                    # Use high-quality resampling and ensure dimensions are even to prevent interlacing
-                    # Make sure target dimensions are even numbers to align with half-block rendering
-                    if target_pixel_height % 2 != 0:
-                        target_pixel_height += 1
-                    
-                    # Detect if image is monochromatic or has color before resizing
-                    is_monochrome, avg_saturation = detect_image_colorfulness(img)
-                    
-                    # Determine saturation boost factor based on image colorfulness
-                    if is_monochrome:
-                        # Don't boost monochromatic images - preserve their grays
-                        saturation_boost = 1.0
-                    else:
-                        # For colorful images, use a moderate boost value
-                        # The boost_color_saturation function will selectively apply it
-                        # only to near-gray colors, leaving saturated colors unchanged
-                        saturation_boost = 1.5  # This value is only applied to pale colors
-                    
-                    # Try to use Fabulous for better image rendering
-                    try:
-                        # Use Fabulous to render the image
-                        fabulous_lines = render_image_with_fabulous(img, char_width, char_height // 2)
-                        
-                        if fabulous_lines:
-                            # Process Fabulous output
-                            for fab_line in fabulous_lines:
-                                # Convert escape sequences to displayable format and extract colors
-                                processed_line, line_colors = process_fabulous_line(fab_line, max_width)
-                                
-                                # Add the line to output
-                                new_lines.append("IMG_LINE:" + processed_line)
-                                image_info.append(line_colors)
-                                image_line_map.append(img_idx)  # Track which image this line belongs to
-                        else:
-                            raise Exception("Fabulous rendering failed")
-                            
-                    except Exception as e:
-                        # Fallback to original pixel processing if Fabulous fails
-                        if state.DEBUG_MODE:
-                            print(f"Fabulous rendering failed for image {img_idx}, using pixel fallback: {e}", file=sys.stderr)
-                        # Keep original image for high-quality oversampling
-                        orig_img = img.copy()
-                        orig_w, orig_h = orig_img.size
-                        
-                        # Calculate target dimensions
-                        target_width = target_pixel_width
-                        target_height = target_pixel_height
-                        
-                        # Ensure height is even for proper half-block pairing
-                        if target_height % 2 != 0:
-                            target_height += 1
-                        
-                        # Store color and character info for each line with simple fallback
-                        for y in range(0, target_height, 2):  # Process 2 rows at a time
-                            line = ""
-                            line_colors = []
-                            
-                            # Simple fallback processing
-                            for x in range(target_width):
-                                # Simple pixel sampling
-                                src_x = min(int(x * orig_w / target_width), orig_w - 1)
-                                src_y_top = min(int(y * orig_h / target_height), orig_h - 1)
-                                src_y_bot = min(int((y + 1) * orig_h / target_height), orig_h - 1)
-                                
-                                top_pixel = orig_img.getpixel((src_x, src_y_top))
-                                bottom_pixel = orig_img.getpixel((src_x, src_y_bot))
-                                
-                                # Use upper slab character
-                                line += '▀'
-                                line_colors.append((top_pixel, bottom_pixel))
-                            
-                            # Add the line to output
-                            padding = " " * ((max_width - len(line)) // 2)
-                            centered_line = padding + line
-                            padded_colors = [((0, 0, 0), (0, 0, 0))] * len(padding) + line_colors
-                            
-                            new_lines.append("IMG_LINE:" + centered_line)
-                            image_info.append(padded_colors)
-                            image_line_map.append(img_idx)  # Track which image this line belongs to
+                    # Prefer a bounded-palette renderer for the curses pad to avoid
+                    # exploding the number of distinct fg/bg pairs.
+                    rendered_lines = render_image_with_quadrant_blocks(img, char_width, char_height)
+
+                    for rendered_line, line_colors in rendered_lines:
+                        padding = " " * ((max_width - len(rendered_line)) // 2)
+                        centered_line = padding + rendered_line
+                        padded_colors = [((0, 0, 0), (0, 0, 0))] * len(padding) + line_colors
+
+                        new_lines.append("IMG_LINE:" + centered_line)
+                        image_info.append(padded_colors)
+                        image_line_map.append(img_idx)  # Track which image this line belongs to
                     
                     new_lines.append("")  # Empty line after image
                     image_line_map.append(None)  # Empty line doesn't belong to any image

@@ -11,7 +11,7 @@
     <div class="container">
         <header>
             <h1>termbook</h1>
-            <p class="tagline">EPUB reader for the terminal with syntax highlighting and image rendering</p>
+            <p class="tagline">EPUB reader for the terminal with syntax highlighting and image previews</p>
         </header>
 
         <main>
@@ -21,8 +21,8 @@
 
             <section class="about">
                 <h2>About</h2>
-                <p>termbook is a terminal-based EPUB reader that renders styled text, syntax-highlighted code blocks, and images directly in your terminal. Navigate by scrolling, page turns, or chapter jumps. Search across the entire book, bookmark passages, and switch color schemes.</p>
-                <p>Built as a curses UI with integrated pygments syntax highlighting and PIL image rendering.</p>
+                <p>termbook is a terminal-based EPUB reader that renders styled text, syntax-highlighted code blocks, and rough image previews in your terminal. Navigate by scrolling, page turns, or chapter jumps. Search across the entire book, bookmark passages, and switch color schemes.</p>
+                <p>Built as a curses UI with integrated pygments syntax highlighting, lightweight in-terminal image previews, and external image opening where available.</p>
             </section>
 
             <section class="features">
@@ -31,7 +31,7 @@
                     <li><strong>EPUB parsing:</strong> Full ZIP-based EPUB extraction, OPF/NCX metadata, and chapter content handling.</li>
                     <li><strong>Text rendering:</strong> Formatted text spans (bold, italic, underline), HTML to terminal conversion, justified layout.</li>
                     <li><strong>Syntax highlighting:</strong> Pygments-powered code block rendering with 20+ language support.</li>
-                    <li><strong>Image display:</strong> Multiple backends—PIL for quality, fabulous for compatibility, quarter-block fallback.</li>
+                    <li><strong>Image display:</strong> Lightweight in-terminal previews, with external opening for higher-fidelity viewing where supported.</li>
                     <li><strong>Navigation:</strong> Scroll, page, chapter navigation; full-book search; chapter table of contents.</li>
                     <li><strong>Bookmarks:</strong> Save and jump to bookmarked lines within the book.</li>
                     <li><strong>Color control:</strong> Switch between dark and light color schemes on supported terminals.</li>
