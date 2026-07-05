@@ -62,6 +62,7 @@ NUC_HOST=nuc-server.local NUC_DEPLOY_DIR=/srv/flatpak/termbook ./scripts/deploy-
 flatpak-builder \
     --arch=x86_64 \
     --repo=build/flatpak/repo \
+    --default-branch=master \
     --force-clean \
     build/flatpak/build \
     flatpak/uk.leehanken.termbook.json
@@ -69,13 +70,20 @@ flatpak-builder \
 
 ### 2. Create Repository Files
 
-Generate `.flatpakref` (for one-click install):
+Generate `.flatpakref` (for one-click install). `Name`, `Branch`, and a `Url`
+pointing at the ostree repo (not the `.flatpakrepo` file) are required;
+`RuntimeRepo` tells Flatpak where to fetch the freedesktop runtime from:
 
 ```ini
 [Flatpak Ref]
+Name=dev.termbook.Termbook
+Branch=master
 Title=termbook
-Url=https://termbook.dev/termbook.flatpakrepo
+Url=https://termbook.dev/repo
+SuggestRemoteName=termbook
+Homepage=https://github.com/macsplit/termbook
 IsRuntime=false
+RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
 ```
 
 Generate `.flatpakrepo` (repository metadata):
@@ -138,14 +146,21 @@ sudo systemctl reload nginx
 
 ## Repository Signing
 
-If you have a GPG key, the deploy script will automatically sign the ostree repository:
+The deploy script signs the ostree repository with the dedicated termbook key
+(the key whose uid is `flatpak@termbook.dev`), or the key given via
+`FLATPAK_GPG_KEY`. It never picks an arbitrary key from the keyring; if no
+termbook key exists the repository is published unsigned.
+
+To create the signing key:
 
 ```bash
-gpg --list-keys  # Find your key ID
-./scripts/deploy-flatpak.sh
+gpg --quick-generate-key "termbook Flatpak Repo <flatpak@termbook.dev>" rsa4096 sign 2y
 ```
 
-The repository signature ensures integrity but is not required for installation.
+The public key is embedded (base64) as `GPGKey=` in the generated
+`.flatpakref` and `.flatpakrepo`, so clients verify signatures automatically.
+When the repository is unsigned, the `GPGKey=` line is omitted and clients
+fall back to `gpg-verify=false`.
 
 ## Verification
 

@@ -48,3 +48,4 @@ local_install.sh
 .epr_history
 .epr_state
 .termbook
+.flatpak-builder/

@@ -10,6 +10,7 @@
 #   NUC_DEPLOY_DIR  - Deploy directory on NUC (default: /var/www/termbook)
 #   FLATPAK_ARCH    - Architecture (default: x86_64)
 #   FLATPAK_BRANCH  - Branch name (default: master)
+#   FLATPAK_GPG_KEY - GPG key id to sign with (default: key for flatpak@termbook.dev)
 #
 
 set -euo pipefail
@@ -103,7 +104,9 @@ info "Building termbook v${VERSION}"
 if [[ "$SKIP_TESTS" != "true" ]]; then
     step "Running tests"
     cd "$REPO_ROOT"
-    if ! venv/bin/python3 -m pytest tests/ -q; then
+    # The pexpect-based tests spawn the "termbook" entry point, so the venv's
+    # bin directory must be on PATH.
+    if ! PATH="${REPO_ROOT}/venv/bin:$PATH" venv/bin/python3 -m pytest tests/ -q; then
         error "Tests failed"
     fi
 fi
@@ -122,48 +125,71 @@ cd "$REPO_ROOT"
 flatpak-builder \
     --arch="$FLATPAK_ARCH" \
     --repo="$OSTREE_REPO" \
+    --default-branch="$FLATPAK_BRANCH" \
     --force-clean \
     "${BUILD_DIR}/build" \
     "$MANIFEST_PATH"
 
 info "Flatpak built successfully"
 
+# Sign repository if GPG is available
+GPG_KEY_ID=""
+if [[ "$HAS_GPG" == "true" ]]; then
+    step "Signing ostree repository"
+
+    # Use FLATPAK_GPG_KEY if set, otherwise look for the dedicated termbook
+    # signing key. Never fall back to an arbitrary key from the keyring.
+    if [[ -n "${FLATPAK_GPG_KEY:-}" ]]; then
+        GPG_KEY_ID="$FLATPAK_GPG_KEY"
+    else
+        GPG_KEY_ID=$(gpg --list-keys --with-colons "flatpak@termbook.dev" 2>/dev/null | grep "^pub:" | head -1 | cut -d: -f5 || true)
+    fi
+
+    if [[ -z "$GPG_KEY_ID" ]]; then
+        warning "No termbook GPG key found (set FLATPAK_GPG_KEY or create a key for flatpak@termbook.dev); repository will be unsigned"
+    else
+        info "Using GPG key: $GPG_KEY_ID"
+        flatpak build-sign --gpg-sign="$GPG_KEY_ID" --gpg-homedir="$HOME/.gnupg" "$OSTREE_REPO"
+        # build-sign only signs commits; the summary must be signed too or
+        # clients with gpg-verify enabled will reject the repo.
+        flatpak build-update-repo --gpg-sign="$GPG_KEY_ID" --gpg-homedir="$HOME/.gnupg" "$OSTREE_REPO"
+        info "Repository signed"
+    fi
+fi
+
+# GPGKey line (base64-encoded public key) for the ref/repo files; omitted
+# entirely when unsigned so clients fall back to gpg-verify=false.
+GPG_KEY_LINE=""
+if [[ -n "$GPG_KEY_ID" ]]; then
+    GPG_KEY_LINE="GPGKey=$(gpg --export "$GPG_KEY_ID" | base64 -w0)"
+fi
+
 # Generate .flatpakref file
 step "Generating .flatpakref file"
-cat > "${TEMP_DIR}/${APP_ID}.flatpakref" << 'EOF'
+cat > "${TEMP_DIR}/${APP_ID}.flatpakref" << EOF
 [Flatpak Ref]
+Name=${APP_ID}
+Branch=${FLATPAK_BRANCH}
 Title=termbook
-Url=https://termbook.dev/termbook.flatpakrepo
-GPGKey=
+Url=https://termbook.dev/repo
+SuggestRemoteName=termbook
+Homepage=https://github.com/macsplit/termbook
 IsRuntime=false
+RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+${GPG_KEY_LINE}
 EOF
 
 # Generate .flatpakrepo file
 step "Generating .flatpakrepo file"
-cat > "${TEMP_DIR}/termbook.flatpakrepo" << 'EOF'
+cat > "${TEMP_DIR}/termbook.flatpakrepo" << EOF
 [Flatpak Repo]
 Title=termbook Repository
 Url=https://termbook.dev/repo
 Comment=EPUB reader for the terminal
 Homepage=https://github.com/macsplit/termbook
 Icon=https://termbook.dev/favicon.png
+${GPG_KEY_LINE}
 EOF
-
-# Sign repository if GPG is available
-if [[ "$HAS_GPG" == "true" ]]; then
-    step "Signing ostree repository"
-
-    # Look for a GPG key
-    GPG_KEY_ID=$(gpg --list-keys --with-colons | grep "pub:" | head -1 | cut -d: -f5)
-
-    if [[ -z "$GPG_KEY_ID" ]]; then
-        warning "No GPG key found; repository will be unsigned"
-    else
-        info "Using GPG key: $GPG_KEY_ID"
-        flatpak build-sign --gpg-sign="$GPG_KEY_ID" --gpg-homedir="$HOME/.gnupg" "$OSTREE_REPO"
-        info "Repository signed"
-    fi
-fi
 
 # Prepare files for deployment
 step "Preparing deployment files"
@@ -229,7 +255,7 @@ server {
         try_files $uri $uri/ =404;
     }
 
-    location = /uk.leehanken.termbook.flatpakref {
+    location = /dev.termbook.Termbook.flatpakref {
         default_type application/vnd.flatpak.ref;
     }
 
