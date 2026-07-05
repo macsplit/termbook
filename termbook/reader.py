@@ -1434,7 +1434,6 @@ def reader(stdscr, ebook, index, width, y, pctg):
 
     global INITIAL_HELP_SHOWN
     
-    countstring = ""
     svline = "dontsave"
     show_initial_help = not INITIAL_HELP_SHOWN  # Only show if not previously shown
     help_message_start_time = time.time()  # Track when help message was first shown
@@ -1454,20 +1453,14 @@ def reader(stdscr, ebook, index, width, y, pctg):
     #                               (re-dispatch immediately, skipping redraw)
 
     def _handle_quit():
-        nonlocal countstring
-        if k == ord('q') and countstring != "":
-            countstring = ""
-        else:
-            savestate(ebook.path, index, width, y, y/totlines)
-            sys.exit()
+        savestate(ebook.path, index, width, y, y/totlines)
+        sys.exit()
         return None
 
     def _handle_scroll_up():
         nonlocal svline, y
-        if count > 1:
-            svline = y - 1
-        if y >= count:
-            y -= count
+        if y >= 1:
+            y -= 1
         elif y == 0 and index != 0:
             return ("return", (-1, width, -rows, None))
         else:
@@ -1479,7 +1472,7 @@ def reader(stdscr, ebook, index, width, y, pctg):
         if y == 0 and index != 0:
             return ("return", (-1, width, -rows, None))
         else:
-            new_y = pgup(y, rows, LINEPRSRV, count)
+            new_y = pgup(y, rows, LINEPRSRV, 1)
             # Skip backward through empty pages if the new position is empty
             if is_page_empty(src_lines, new_y, rows):
                 new_y = skip_empty_pages_backward(src_lines, new_y, rows)
@@ -1488,10 +1481,8 @@ def reader(stdscr, ebook, index, width, y, pctg):
 
     def _handle_scroll_down():
         nonlocal svline, y
-        if count > 1:
-            svline = y + rows - 1
-        if y + count <= totlines - rows:
-            y += count
+        if y + 1 <= totlines - rows:
+            y += 1
         elif y == totlines - rows and index != len(contents)-1:
             return ("return", (1, width, 0, None))
         else:
@@ -1513,17 +1504,17 @@ def reader(stdscr, ebook, index, width, y, pctg):
 
     def _handle_ch_next():
         state.CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
-        if index + count < len(contents) - 1:
-            return ("return", (count, width, 0, None))
-        if index + count >= len(contents) - 1:
+        if index + 1 < len(contents) - 1:
+            return ("return", (1, width, 0, None))
+        if index + 1 >= len(contents) - 1:
             return ("return", (len(contents) - index - 1, width, 0, None))
         return None
 
     def _handle_ch_prev():
         state.CURRENT_SEARCH_TERM = None  # Clear search when changing chapters
-        if index - count > 0:
-            return ("return", (-count, width, 0, None))
-        elif index - count <= 0:
+        if index - 1 > 0:
+            return ("return", (-1, width, 0, None))
+        elif index - 1 <= 0:
             return ("return", (-index, width, 0, None))
         return None
 
@@ -1943,30 +1934,21 @@ def reader(stdscr, ebook, index, width, y, pctg):
     key_handlers[curses.KEY_RESIZE] = _handle_resize
 
     while True:
-        if countstring == "":
-            count = 1
-        else:
-            count = int(countstring)
-        if k in range(48, 58): # i.e., k is a numeral
-            countstring = countstring + chr(k)
-        else:
-            handler = key_handlers.get(k)
-            if handler is not None:
-                outcome = handler()
-                if outcome is not None:
-                    kind, payload = outcome
-                    if kind == "return":
-                        return payload
-                    else:  # "continue"
-                        k = payload
-                        continue
-            countstring = ""
+        handler = key_handlers.get(k)
+        if handler is not None:
+            outcome = handler()
+            if outcome is not None:
+                kind, payload = outcome
+                if kind == "return":
+                    return payload
+                else:  # "continue"
+                    k = payload
+                    continue
 
         if svline != "dontsave":
             pad.chgat(svline, 0, width, curses.A_UNDERLINE)
         try:
             stdscr.clear()
-            stdscr.addstr(0, 0, countstring)
             
             # Add debug info if --debug flag is used
             if state.DEBUG_MODE:

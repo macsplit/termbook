@@ -192,8 +192,16 @@ rsync -av --delete "$OSTREE_REPO/" "${NUC_HOST}:${NUC_DEPLOY_DIR}/repo/" || erro
 # Generate and deploy nginx configuration
 step "Configuring nginx on NUC"
 
-# Find the next available port
+# Reuse the existing termbook.dev port if present; otherwise fall back to the
+# first free slot in the usual range.
 NEXT_PORT=$(ssh "$NUC_HOST" "
+  if [ -f /etc/nginx/sites-available/termbook.dev ]; then
+    existing=\$(sed -n 's/^[[:space:]]*listen[[:space:]]\\+\\([0-9][0-9]*\\);/\\1/p' /etc/nginx/sites-available/termbook.dev | head -1)
+    if [ -n \"\$existing\" ]; then
+      echo \$existing
+      exit 0
+    fi
+  fi
   for port in 33333 33334 33335 33336 33337 33338 33339 33340; do
     if ! grep -q \"listen \$port\" /etc/nginx/sites-available/* 2>/dev/null; then
       echo \$port
