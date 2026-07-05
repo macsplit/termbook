@@ -78,6 +78,30 @@ LINEPRSRV = 0  # default = 2
 VWR = None
 SEARCHPATTERN = None
 INITIAL_HELP_SHOWN = False
+
+
+def _is_flatpak_runtime():
+    """Return True when running inside a Flatpak sandbox."""
+    return os.path.exists("/.flatpak-info")
+
+
+def _external_open_temp_dir():
+    """Choose a temp directory the host viewer can access.
+
+    Flatpak sandboxes often back `/tmp` with a private mount, so files created
+    there are invisible to a host-side image viewer launched through the
+    portal. Use the app cache directory instead, which is shared with the host.
+    """
+    if not _is_flatpak_runtime():
+        return None
+
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if not cache_home:
+        cache_home = os.path.join(os.path.expanduser("~"), ".cache")
+
+    temp_dir = os.path.join(cache_home, "termbook", "external-open")
+    os.makedirs(temp_dir, exist_ok=True)
+    return temp_dir
 RESIZE_REQUESTED = False
 RESIZE_TIMER = None
 RESIZE_DELAY = 1.0
@@ -402,34 +426,38 @@ def get_visible_images(src_lines, imgs, y, rows, image_line_map=None):
 def open_image_in_system_viewer(ebook, chpath, img_path):
     """
     Extract image from EPUB and open it in the system's default image viewer
-    
+
     Args:
         ebook: The EPUB file object
         chpath: Chapter path for resolving relative paths
         img_path: Path to the image within the EPUB
-        
+
     Returns:
         bool: True if successful, False if failed
     """
     try:
         # Get correct image path using dots_path
         imgsrc = dots_path(chpath, img_path)
-        
+
         # Extract and save the image to temp file
         img_data = ebook.file.read(imgsrc)
-        
+
         # Determine file extension
         ext = os.path.splitext(img_path)[1] or '.png'
-        
+
         # Create temp file
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(
+            suffix=ext,
+            dir=_external_open_temp_dir(),
+            delete=False,
+        ) as tmp:
             tmp.write(img_data)
             tmp_path = tmp.name
-        
+
         # Open with system default viewer
         if os.name == 'posix':
-            subprocess.run(['xdg-open', tmp_path], 
-                         stdout=subprocess.DEVNULL, 
+            subprocess.run(['xdg-open', tmp_path],
+                         stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
                          check=False)
         elif os.name == 'nt':
@@ -716,7 +744,7 @@ def open_media(scr, epub, src):
                 print(f"Inline image display failed, falling back to external viewer: {e}", file=sys.stderr)
     
     # Fall back to external viewer for non-images or if display failed
-    fd, path = tempfile.mkstemp(suffix=sfx)
+    fd, path = tempfile.mkstemp(suffix=sfx, dir=_external_open_temp_dir())
     try:
         with os.fdopen(fd, "wb") as tmp:
             tmp.write(epub.file.read(src))
